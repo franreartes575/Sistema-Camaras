@@ -94,19 +94,35 @@ export default function MapView({
     [routes],
   );
 
-  // Encuadra el mapa sobre los datos cada vez que cambia el conjunto.
-  useEffect(() => {
+  /** Encuadra el mapa sobre el conjunto de puntos que se le pase. */
+  const fitTo = useCallback((subset: Camera[], maxZoom: number) => {
     const map = mapRef.current;
-    if (!map || cameras.length === 0) return;
+    if (!map || subset.length === 0) return;
 
-    const lats = cameras.map((camera) => camera.lat);
-    const lons = cameras.map((camera) => camera.lon);
+    const lats = subset.map((camera) => camera.lat);
+    const lons = subset.map((camera) => camera.lon);
     const bounds: LngLatBoundsLike = [
       [Math.min(...lons), Math.min(...lats)],
       [Math.max(...lons), Math.max(...lats)],
     ];
-    map.fitBounds(bounds, { padding: 60, maxZoom: 15, duration: 600 });
-  }, [cameras]);
+    map.fitBounds(bounds, { padding: 60, maxZoom, duration: 600 });
+  }, []);
+
+  // Al cargar datos nuevos, encuadrar todo.
+  useEffect(() => {
+    fitTo(cameras, 15);
+  }, [cameras, fitTo]);
+
+  // Al elegir un cluster, acercarse a el. Sin esto, una sola parada lejana
+  // obliga a alejar tanto el mapa que los recorridos quedan de un pixel y
+  // parece que no se dibujo nada.
+  useEffect(() => {
+    if (selectedCluster === null) return;
+    fitTo(
+      cameras.filter((camera) => camera.cluster === selectedCluster),
+      16,
+    );
+  }, [selectedCluster, cameras, fitTo]);
 
   const handleClick = useCallback(
     (event: { features?: { properties?: Record<string, unknown> }[] }) => {

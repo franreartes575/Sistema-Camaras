@@ -7,7 +7,17 @@ from pathlib import Path
 import pandas as pd
 
 # Patrones para inferir el rol de cada columna a partir de su nombre.
-_ID_PATTERNS = (r"^id$", r"id[_ ]?cam", r"cam.*id", r"c[oó]digo", r"nro", r"n[uú]mero")
+_ID_PATTERNS = (
+    r"^n[°º]\s*ot",  # "N° OT": numero de orden de trabajo
+    r"^id$",
+    r"id[_ ]?cam",
+    r"cam.*id",
+    r"^id",  # "ID Contrato"
+    r"c[oó]digo",
+    r"^nro",
+    r"n[uú]mero",
+    r"contrato",
+)
 _LAT_PATTERNS = (r"^lat", r"latitud", r"latitude", r"^y$")
 _LON_PATTERNS = (r"^lon", r"^lng", r"longitud", r"longitude", r"^x$")
 _LABEL_PATTERNS = (r"direcc", r"domicilio", r"address", r"nombre", r"descrip")

@@ -38,7 +38,8 @@ export default function Home() {
   const [file, setFile] = useState<File | null>(null);
   const [upload, setUpload] = useState<UploadExcelResponse | null>(null);
   const [mapping, setMapping] = useState<ColumnMapping>(EMPTY_MAPPING);
-  const [params, setParams] = useState<ClusterParams>({ eps_km: 1, min_samples: 2 });
+  // 5 km agrupa una ciudad entera; con 1 km casi nada llega a formar grupo.
+  const [params, setParams] = useState<ClusterParams>({ eps_km: 5, min_samples: 2 });
   const [routing, setRouting] = useState<RouteParams>({
     provider: "auto",
     round_trip: false,

@@ -100,8 +100,6 @@ export type ColumnMapping = {
 export type ClusterParams = {
   eps_km: number;
   min_samples: number;
-  /** Extension geografica de las camaras validas, en km. */
-  span_km: number;
 };
 
 export type RouteParams = {
