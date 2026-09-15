@@ -108,9 +108,13 @@ export default function MapView({
     map.fitBounds(bounds, { padding: 60, maxZoom, duration: 600 });
   }, []);
 
-  // Al cargar datos nuevos, encuadrar todo.
+  // Al cargar datos nuevos, encuadrar los recorridos — no todos los puntos.
+  // Una sola parada aislada a cientos de kilometros obligaria a alejar tanto
+  // el mapa que los recorridos quedarian de un pixel. Si no hay ningun
+  // recorrido, se encuadra todo lo que haya.
   useEffect(() => {
-    fitTo(cameras, 15);
+    const enRuta = cameras.filter((camera) => camera.cluster !== -1);
+    fitTo(enRuta.length > 0 ? enRuta : cameras, 15);
   }, [cameras, fitTo]);
 
   // Al elegir un cluster, acercarse a el. Sin esto, una sola parada lejana
