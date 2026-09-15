@@ -194,3 +194,73 @@ def test_rechaza_columna_inexistente() -> None:
 
     with pytest.raises(ValueError, match="no_existe"):
         extract_points(frame, "id_camara", "no_existe", "lon")
+
+
+# --------------------------------------------------------------------------
+# Regresion: una columna que nombra ambas coordenadas
+# --------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "columna",
+    [
+        "Latitud y Longitud",
+        "LATITUD/LONGITUD",
+        "Lat-Long",
+        "Coordenadas (Latitud, Longitud)",
+        "LAT LONG",
+        "lat_lon",
+    ],
+)
+def test_columna_que_nombra_ambas_coordenadas_es_combinada(columna: str) -> None:
+    """Regresion: se asignaba la misma columna a latitud y a longitud.
+
+    El detector elegia modo 'split' con col_lat == col_lon, y al convertir ese
+    texto a numero daba NaN en todas las filas. El usuario veia un 422 sin
+    ninguna pista de que el mapeo era el problema.
+    """
+    result = suggest_mapping(["id_camara", "direccion", columna])
+
+    assert result["mode"] == "single"
+    assert result["coords"] == columna
+    # Lo esencial: nunca la misma columna en los dos roles.
+    assert not (result["lat"] is not None and result["lat"] == result["lon"])
+
+
+def test_dos_columnas_separadas_siguen_en_modo_split() -> None:
+    """El caso normal no debe verse afectado por la correccion."""
+    result = suggest_mapping(["id_camara", "Latitud", "Longitud"])
+
+    assert result["mode"] == "split"
+    assert result["lat"] == "Latitud"
+    assert result["lon"] == "Longitud"
+
+
+def test_rechaza_lat_y_lon_apuntando_a_la_misma_columna() -> None:
+    """Si el usuario fuerza ese mapeo a mano, el error lo explica."""
+    frame = pd.DataFrame(
+        {"id_camara": ["A"], "Coordenadas": ["-24,7859,-65,4117"]}
+    )
+
+    with pytest.raises(ValueError, match="misma columna"):
+        extract_points(frame, "id_camara", "Coordenadas", "Coordenadas")
+
+
+def test_columna_combinada_con_nombre_ambiguo_se_parsea() -> None:
+    """El flujo completo con el nombre que disparaba el bug."""
+    frame = pd.DataFrame(
+        {
+            "id_camara": ["CAM-1", "CAM-2"],
+            "Latitud y Longitud": ["-24,7859,-65,4117", "-24,7870,-65,4107"],
+        }
+    )
+    sugerencia = suggest_mapping(list(frame.columns))
+
+    points, discarded = extract_points(
+        frame, "id_camara", col_coords=sugerencia["coords"], coord_order="auto"
+    )
+
+    assert len(points) == 2
+    assert discarded == []
+    assert points.iloc[0]["lat"] == pytest.approx(-24.7859)
+    assert points.iloc[0]["lon"] == pytest.approx(-65.4117)

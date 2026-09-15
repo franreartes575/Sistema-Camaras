@@ -62,6 +62,15 @@ def suggest_mapping(columns: list[str]) -> dict[str, str | None]:
     lon = _match(columns, _LON_PATTERNS)
     coords = _match(columns, _COORDS_PATTERNS)
 
+    # Una sola columna que nombra a las dos coordenadas —"Latitud y Longitud",
+    # "LAT/LONG"— no son dos columnas: es una combinada. Sin este chequeo se le
+    # asignaría el mismo nombre a ambos roles y el parseo numérico daría NaN en
+    # todas las filas, con un error que no explica nada.
+    if lat is not None and lat == lon:
+        coords = coords or lat
+    if coords is not None and coords in (lat, lon):
+        lat = lon = None
+
     # Si no hay par lat/lon pero sí una columna combinada, arrancamos en modo
     # de columna única.
     mode = "split" if lat and lon else ("single" if coords else "split")
@@ -208,6 +217,13 @@ def extract_points(
         raise ValueError(
             "Indique una columna combinada de coordenadas o las columnas de "
             "latitud y longitud por separado."
+        )
+
+    if not single and col_lat == col_lon:
+        raise ValueError(
+            f"Latitud y longitud apuntan a la misma columna ('{col_lat}'). "
+            f"Si esa columna trae los dos valores juntos, elija el modo de "
+            f"columna única."
         )
 
     needed = [col_id, col_coords] if single else [col_id, col_lat, col_lon]

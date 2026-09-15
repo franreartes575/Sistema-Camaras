@@ -178,9 +178,18 @@ async def _ingest_and_cluster(
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     if points.empty:
+        usadas = (
+            f"columna combinada '{col_coords}'"
+            if col_coords
+            else f"latitud '{col_lat}' y longitud '{col_lon}'"
+        )
         raise HTTPException(
             status_code=422,
-            detail="Ninguna fila tiene coordenadas válidas. Revise el mapeo de columnas.",
+            detail=(
+                f"Ninguna de las {total_rows} filas dio coordenadas válidas "
+                f"leyendo {usadas}. Verifique que el mapeo de columnas sea el "
+                f"correcto y que esa columna contenga números."
+            ),
         )
 
     labels, clusters = run_dbscan(points, eps_km=eps_km, min_samples=min_samples)
