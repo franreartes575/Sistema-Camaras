@@ -31,7 +31,7 @@ from .schemas import (
     SuggestedMapping,
     UploadExcelResponse,
 )
-from .services.clustering import run_dbscan
+from .services.clustering import bounding_span_km, run_dbscan
 from .services.ingest import (
     extract_points,
     read_dataframe,
@@ -45,6 +45,12 @@ from .services.routing import (
     RoutingProvider,
     select_provider,
 )
+
+# Salta mide unos 600 km de punta a punta. Si las coordenadas leidas abarcan
+# bastante mas que eso, lo mas probable es que el mapeo apunte a columnas que
+# contienen numeros pero no coordenadas.
+MAX_SPAN_PLAUSIBLE_KM = 800.0
+
 
 app = FastAPI(
     title="Sistema Logístico Free",
@@ -137,6 +143,25 @@ class Clustered(NamedTuple):
     cameras: list[Camera]
     clusters: list[Cluster]
     discarded: list[DiscardedRow]
+    warning: str | None
+
+
+def _mapping_warning(
+    span_km: float, valid: int, total: int, origen: str
+) -> str | None:
+    """Avisa cuando el resultado no se parece a un conjunto de camaras reales."""
+    if span_km > MAX_SPAN_PLAUSIBLE_KM:
+        return (
+            f"Las coordenadas leídas de {origen} abarcan {span_km:,.0f} km, "
+            f"mucho más que una provincia. Es casi seguro que esa columna no "
+            f"contiene coordenadas. Revise el mapeo."
+        )
+    if total >= 5 and valid < total / 2:
+        return (
+            f"Sólo {valid} de {total} filas dieron coordenadas válidas. "
+            f"Verifique que {origen} sea la columna correcta."
+        )
+    return None
 
 
 async def _ingest_and_cluster(
@@ -192,6 +217,14 @@ async def _ingest_and_cluster(
             ),
         )
 
+    span_km = bounding_span_km(points)
+    origen = (
+        f"la columna '{col_coords}'"
+        if col_coords
+        else f"las columnas '{col_lat}' y '{col_lon}'"
+    )
+    warning = _mapping_warning(span_km, len(points), total_rows, origen)
+
     labels, clusters = run_dbscan(points, eps_km=eps_km, min_samples=min_samples)
 
     cameras = [
@@ -215,10 +248,12 @@ async def _ingest_and_cluster(
             noise_count=sum(1 for camera in cameras if camera.cluster == -1),
             eps_km=eps_km,
             min_samples=min_samples,
+            span_km=round(span_km, 1),
         ),
         cameras=cameras,
         clusters=[Cluster(**cluster) for cluster in clusters],
         discarded=[DiscardedRow(**row) for row in discarded],
+        warning=warning,
     )
 
 
@@ -257,6 +292,7 @@ async def process(
 
     return ProcessResponse(
         filename=result.filename,
+        warning=result.warning,
         stats=result.stats,
         cameras=result.cameras,
         clusters=result.clusters,
@@ -383,11 +419,13 @@ async def optimize(
     except RoutingError as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
 
+    avisos = [a for a in (result.warning, solved.warning) if a]
+
     return OptimizeResponse(
         filename=result.filename,
         provider=solved.provider_name,
         is_road_network=solved.is_road_network,
-        warning=solved.warning,
+        warning=" ".join(avisos) if avisos else None,
         stats=result.stats,
         cameras=result.cameras,
         clusters=result.clusters,

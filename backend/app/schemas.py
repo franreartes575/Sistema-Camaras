@@ -70,12 +70,18 @@ class IngestStats(BaseModel):
     noise_count: int = Field(..., description="Cámaras sin cluster (ruido DBSCAN)")
     eps_km: float
     min_samples: int
+    span_km: float = Field(
+        0.0, description="Extension geografica que abarcan las cámaras válidas"
+    )
 
 
 class ProcessResponse(BaseModel):
     """Respuesta de POST /process/."""
 
     filename: str
+    warning: str | None = Field(
+        None, description="Aviso sobre la plausibilidad del mapeo de columnas"
+    )
     stats: IngestStats
     cameras: list[Camera]
     clusters: list[Cluster]

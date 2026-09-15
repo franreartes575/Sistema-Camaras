@@ -25,6 +25,26 @@ def haversine_km(
     return 2 * EARTH_RADIUS_KM * np.arcsin(np.sqrt(a))
 
 
+def bounding_span_km(points: pd.DataFrame) -> float:
+    """Distancia entre las esquinas del rectangulo que contiene a los puntos.
+
+    Sirve como control de plausibilidad del mapeo de columnas: si lo que se
+    tomo por coordenadas son en realidad otros numeros —un codigo de zona, un
+    numero de cliente— los puntos se dispersan por medio continente y esta
+    medida lo delata.
+    """
+    if len(points) < 2:
+        return 0.0
+
+    lat = points["lat"].to_numpy(dtype=float)
+    lon = points["lon"].to_numpy(dtype=float)
+    return float(
+        haversine_km(
+            np.array([lat.max()]), np.array([lon.max()]), lat.min(), lon.min()
+        )[0]
+    )
+
+
 def run_dbscan(
     points: pd.DataFrame, eps_km: float, min_samples: int
 ) -> tuple[np.ndarray, list[dict[str, float | int]]]:
