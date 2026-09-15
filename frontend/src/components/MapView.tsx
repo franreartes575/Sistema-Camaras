@@ -155,11 +155,16 @@ export default function MapView({
   }, [selectedCluster]);
 
   const lineColor = useMemo(() => {
-    const selectedCase =
-      selectedCluster === null
-        ? []
-        : [["==", ["get", "cluster"], selectedCluster], SERIES_SELECTED];
-    return ["case", ...selectedCase, SERIES_BASE];
+    // Sin cluster seleccionado no hay nada que distinguir: va un color liso.
+    // Un `case` necesita condicion, resultado y fallback — ["case", color] es
+    // invalido y MapLibre rechaza la capa entera, dejando las rutas sin dibujar.
+    if (selectedCluster === null) return SERIES_BASE;
+    return [
+      "case",
+      ["==", ["get", "cluster"], selectedCluster],
+      SERIES_SELECTED,
+      SERIES_BASE,
+    ];
   }, [selectedCluster]);
 
   return (
