@@ -1,0 +1,261 @@
+"""Lectura y validación de planillas de cámaras."""
+
+import io
+import re
+from pathlib import Path
+
+import pandas as pd
+
+# Patrones para inferir el rol de cada columna a partir de su nombre.
+_ID_PATTERNS = (r"^id$", r"id[_ ]?cam", r"cam.*id", r"c[oó]digo", r"nro", r"n[uú]mero")
+_LAT_PATTERNS = (r"^lat", r"latitud", r"latitude", r"^y$")
+_LON_PATTERNS = (r"^lon", r"^lng", r"longitud", r"longitude", r"^x$")
+_LABEL_PATTERNS = (r"direcc", r"domicilio", r"address", r"nombre", r"descrip")
+# Columna única que trae latitud y longitud juntas.
+_COORDS_PATTERNS = (
+    r"coordenada",
+    r"^coords?$",
+    r"lat.*lon",
+    r"lon.*lat",
+    r"ubicac",
+    r"posici[oó]n",
+    r"geo",
+    r"punto",
+)
+
+
+def read_dataframe(filename: str, raw: bytes) -> pd.DataFrame:
+    """Carga la planilla completa a un DataFrame."""
+    suffix = Path(filename).suffix.lower()
+    buffer = io.BytesIO(raw)
+
+    if suffix == ".csv":
+        return pd.read_csv(buffer)
+    return pd.read_excel(buffer, engine="openpyxl")
+
+
+def read_headers(filename: str, raw: bytes) -> list[str]:
+    """Lee únicamente la fila de encabezados, sin cargar los datos."""
+    suffix = Path(filename).suffix.lower()
+    buffer = io.BytesIO(raw)
+
+    if suffix == ".csv":
+        frame = pd.read_csv(buffer, nrows=0)
+    else:
+        frame = pd.read_excel(buffer, nrows=0, engine="openpyxl")
+
+    return [str(column) for column in frame.columns]
+
+
+def _match(columns: list[str], patterns: tuple[str, ...]) -> str | None:
+    """Devuelve la primera columna cuyo nombre coincide con algún patrón."""
+    for pattern in patterns:
+        for column in columns:
+            if re.search(pattern, column.strip().lower()):
+                return column
+    return None
+
+
+def suggest_mapping(columns: list[str]) -> dict[str, str | None]:
+    """Infiere qué columna cumple cada rol, para precargar el formulario."""
+    lat = _match(columns, _LAT_PATTERNS)
+    lon = _match(columns, _LON_PATTERNS)
+    coords = _match(columns, _COORDS_PATTERNS)
+
+    # Si no hay par lat/lon pero sí una columna combinada, arrancamos en modo
+    # de columna única.
+    mode = "split" if lat and lon else ("single" if coords else "split")
+
+    return {
+        "id": _match(columns, _ID_PATTERNS),
+        "lat": lat,
+        "lon": lon,
+        "coords": coords,
+        "label": _match(columns, _LABEL_PATTERNS),
+        "mode": mode,
+    }
+
+
+def _to_float_series(series: pd.Series) -> pd.Series:
+    """Convierte a float tolerando coma decimal y separadores de miles."""
+    # No basta con comparar contra `object`: pandas 3.0 usa un dtype `str`
+    # dedicado para las columnas de texto.
+    if not pd.api.types.is_numeric_dtype(series):
+        series = (
+            series.astype(str)
+            .str.strip()
+            .str.replace(r"\.(?=\d{3}\b)", "", regex=True)  # miles: 1.234,56
+            .str.replace(",", ".", regex=False)
+        )
+    return pd.to_numeric(series, errors="coerce")
+
+
+def _to_float(text: str) -> float | None:
+    """Convierte un escalar suelto, tolerando coma decimal."""
+    cleaned = re.sub(r"\.(?=\d{3}\b)", "", text.strip()).replace(",", ".")
+    try:
+        return float(cleaned)
+    except ValueError:
+        return None
+
+
+def _candidate_pairs(text: str) -> list[tuple[float, float]]:
+    """Devuelve las lecturas plausibles de una celda con ambos valores.
+
+    El caso difícil es la coma decimal: "-34,6037,-58,3816" trae cuatro comas y
+    hay que reagrupar los pares. Cuando la partición es ambigua se prueban todas
+    las agrupaciones y más adelante se descarta la que no dé coordenadas válidas.
+    """
+    cleaned = text.strip().strip("()[]{}").replace("|", ";")
+
+    # Punto y coma o espacio separan sin ambigüedad: la coma queda como decimal.
+    for separator in (";", None):
+        parts = cleaned.split(";") if separator == ";" else cleaned.split()
+        if len(parts) == 2:
+            first, second = _to_float(parts[0]), _to_float(parts[1])
+            if first is not None and second is not None:
+                return [(first, second)]
+
+    parts = [part for part in cleaned.split(",") if part.strip()]
+
+    if len(parts) == 2:  # "-34.6037,-58.3816"
+        groupings = [(parts[:1], parts[1:])]
+    elif len(parts) == 4:  # "-34,6037,-58,3816" — coma decimal en ambos
+        groupings = [(parts[:2], parts[2:])]
+    elif len(parts) == 3:  # coma decimal en uno solo de los dos
+        groupings = [(parts[:2], parts[2:]), (parts[:1], parts[1:])]
+    else:
+        return []
+
+    pairs: list[tuple[float, float]] = []
+    for left, right in groupings:
+        first = _to_float(",".join(left))
+        second = _to_float(",".join(right))
+        if first is not None and second is not None:
+            pairs.append((first, second))
+    return pairs
+
+
+def _valid_coords(lat: float, lon: float) -> bool:
+    """Rango geográfico válido, excluyendo la isla nula."""
+    return -90 <= lat <= 90 and -180 <= lon <= 180 and not (lat == 0 and lon == 0)
+
+
+def parse_coord_cell(text: object, order: str) -> tuple[float, float] | None:
+    """Extrae (lat, lon) de una celda que trae ambos valores juntos.
+
+    `order` acepta "latlon", "lonlat" o "auto". En "auto" se resuelve por rango
+    cuando uno de los valores excede ±90 —sólo puede ser longitud—; si ambos
+    caben en el rango de latitud la lectura es genuinamente ambigua y se asume
+    lat,lon, que es la convención de Google Maps y de la mayoría de los GPS.
+    """
+    # Las celdas vacías llegan como NaN: pandas 3.0 ya no las convierte a la
+    # cadena "nan" al hacer astype(str).
+    if text is None or pd.isna(text):
+        return None
+
+    for first, second in _candidate_pairs(str(text)):
+        if order == "lonlat":
+            candidates = [(second, first)]
+        elif order == "latlon":
+            candidates = [(first, second)]
+        else:
+            # Un valor fuera de ±90 sólo puede ser longitud.
+            if abs(first) > 90 and abs(second) <= 90:
+                candidates = [(second, first)]
+            elif abs(second) > 90 and abs(first) <= 90:
+                candidates = [(first, second)]
+            else:
+                candidates = [(first, second)]
+
+        for lat, lon in candidates:
+            if _valid_coords(lat, lon):
+                return lat, lon
+
+    return None
+
+
+def _split_coord_column(series: pd.Series, order: str) -> tuple[pd.Series, pd.Series]:
+    """Parte una columna de coordenadas combinadas en dos series numéricas."""
+    parsed = series.map(lambda text: parse_coord_cell(text, order))
+    lat = parsed.map(lambda pair: pair[0] if pair else None)
+    lon = parsed.map(lambda pair: pair[1] if pair else None)
+    return (
+        pd.to_numeric(lat, errors="coerce"),
+        pd.to_numeric(lon, errors="coerce"),
+    )
+
+
+def extract_points(
+    frame: pd.DataFrame,
+    col_id: str,
+    col_lat: str | None = None,
+    col_lon: str | None = None,
+    col_label: str | None = None,
+    col_coords: str | None = None,
+    coord_order: str = "auto",
+) -> tuple[pd.DataFrame, list[dict[str, object]]]:
+    """Normaliza y valida las filas geográficas.
+
+    Acepta las coordenadas en dos columnas separadas (`col_lat`/`col_lon`) o en
+    una sola columna combinada (`col_coords`).
+
+    Devuelve el DataFrame de puntos válidos (columnas id/lat/lon/label) y la
+    lista de filas descartadas con su motivo.
+    """
+    single = bool(col_coords)
+    if not single and not (col_lat and col_lon):
+        raise ValueError(
+            "Indique una columna combinada de coordenadas o las columnas de "
+            "latitud y longitud por separado."
+        )
+
+    needed = [col_id, col_coords] if single else [col_id, col_lat, col_lon]
+    if col_label:
+        needed.append(col_label)
+
+    missing = [name for name in needed if name and name not in frame.columns]
+    if missing:
+        raise ValueError(f"Columnas inexistentes en la planilla: {', '.join(missing)}")
+
+    if single:
+        lat_series, lon_series = _split_coord_column(frame[col_coords], coord_order)
+    else:
+        lat_series = _to_float_series(frame[col_lat])
+        lon_series = _to_float_series(frame[col_lon])
+
+    work = pd.DataFrame(
+        {
+            "row": range(1, len(frame) + 1),
+            "id": frame[col_id].astype(str).str.strip(),
+            "lat": lat_series.to_numpy(),
+            "lon": lon_series.to_numpy(),
+        }
+    )
+    work["label"] = frame[col_label].astype(str).str.strip() if col_label else None
+
+    discarded: list[dict[str, object]] = []
+
+    def drop(mask: pd.Series, reason: str) -> None:
+        """Registra y elimina las filas marcadas por `mask`."""
+        nonlocal work
+        if not mask.any():
+            return
+        for row in work.loc[mask, "row"]:
+            discarded.append({"row": int(row), "reason": reason})
+        work = work.loc[~mask]
+
+    drop(
+        work["lat"].isna() | work["lon"].isna(),
+        "No se pudo interpretar el par de coordenadas"
+        if single
+        else "Coordenada vacía o no numérica",
+    )
+    drop(
+        ~work["lat"].between(-90, 90) | ~work["lon"].between(-180, 180),
+        "Coordenada fuera de rango válido",
+    )
+    drop((work["lat"] == 0) & (work["lon"] == 0), "Coordenada nula (0,0)")
+    drop(work["id"].isin(["", "nan", "None"]), "Identificador vacío")
+
+    return work.reset_index(drop=True), discarded

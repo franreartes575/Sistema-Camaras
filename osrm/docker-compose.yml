@@ -1,0 +1,39 @@
+# Motor de ruteo OSRM para la provincia de Salta.
+#
+# Antes de levantarlo hay que construir el grafo una sola vez con
+# `preparar.ps1`, que descarga el mapa, lo recorta a Salta y lo procesa.
+
+services:
+  osrm:
+    image: ghcr.io/project-osrm/osrm-backend:latest
+    container_name: osrm-salta
+    # MLD es el algoritmo recomendado por OSRM: preprocesado mas rapido que CH
+    # y permite recustomizar el grafo sin reextraerlo.
+    command: >
+      osrm-routed
+      --algorithm mld
+      --max-table-size 100
+      /data/salta-latest.osrm
+    volumes:
+      - ./data:/data
+    ports:
+      # Solo localhost: el motor no queda expuesto a la red.
+      - "127.0.0.1:5000:5000"
+    restart: unless-stopped
+    healthcheck:
+      # La imagen de OSRM no trae wget ni curl, pero si bash: /dev/tcp alcanza
+      # para hacer la consulta. La sonda pide el punto mas cercano a la plaza
+      # 9 de Julio, asi que verifica que el grafo de Salta este cargado y
+      # respondiendo, no solo que el puerto este abierto.
+      test:
+        - CMD
+        - bash
+        - -c
+        - >-
+          exec 3<>/dev/tcp/127.0.0.1/5000;
+          printf 'GET /nearest/v1/driving/-65.4117,-24.7859 HTTP/1.0\r\n\r\n' >&3;
+          grep -q Ok <&3
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s

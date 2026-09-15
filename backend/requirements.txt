@@ -1,0 +1,11 @@
+fastapi
+uvicorn[standard]
+python-multipart
+pandas
+openpyxl
+scikit-learn
+ortools
+httpx
+requests
+pytest
+pytest-cov
