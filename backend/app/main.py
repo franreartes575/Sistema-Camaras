@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import AsyncIterator, NamedTuple
 
 import anyio
+import numpy as np
 
 from fastapi import Depends, FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
@@ -39,7 +40,12 @@ from .schemas import (
     SuggestedMapping,
     UploadExcelResponse,
 )
-from .services.clustering import bounding_span_km, reassign_noise, run_dbscan
+from .services.clustering import (
+    bounding_span_km,
+    haversine_km,
+    reassign_noise,
+    run_dbscan,
+)
 from .services.ingest import (
     extract_points,
     read_dataframe,
@@ -425,6 +431,40 @@ def _parse_cluster_starts(raw: str) -> dict[int, ClusterStart]:
     return starts
 
 
+def _check_starts_near_clusters(
+    clusters: list[Cluster], starts: dict[int, ClusterStart]
+) -> None:
+    """Rechaza puntos de partida a una distancia imposible de su cluster.
+
+    Una base a más de `MAX_SPAN_PLAUSIBLE_KM` de sus cámaras no es una sede
+    lejana: son coordenadas mal cargadas (típicamente lat/lon invertidas o un
+    signo perdido). Sin este chequeo el optimizador corre igual, ninguna
+    cámara entra en la jornada y el síntoma no apunta a la causa.
+    """
+    for cluster in clusters:
+        start = starts[cluster.id]
+        distance_km = float(
+            haversine_km(
+                np.array([start.lat]),
+                np.array([start.lon]),
+                cluster.centroid_lat,
+                cluster.centroid_lon,
+            )[0]
+        )
+        if distance_km > MAX_SPAN_PLAUSIBLE_KM:
+            # Separador de miles a la argentina: 5.231 km, no 5,231 km.
+            distancia = f"{distance_km:,.0f}".replace(",", ".")
+            raise HTTPException(
+                status_code=422,
+                detail=(
+                    f"El punto de partida del cluster {cluster.id} "
+                    f"({start.lat:.4f}, {start.lon:.4f}) está a {distancia} km "
+                    f"de sus cámaras. Revise las coordenadas de la sede: "
+                    f"¿latitud y longitud invertidas o sin el signo negativo?"
+                ),
+            )
+
+
 def _route_for_cluster(
     cluster_id: int,
     members: list[Camera],
@@ -638,6 +678,7 @@ async def optimize(
                 + ", ".join(str(cluster_id) for cluster_id in missing)
             ),
         )
+    _check_starts_near_clusters(result.clusters, cluster_starts)
 
     try:
         solved = await anyio.to_thread.run_sync(

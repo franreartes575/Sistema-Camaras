@@ -61,7 +61,26 @@ export default function Home() {
   const [clusterStarts, setClusterStarts] = useState<Record<number, ClusterStart>>({});
   const [result, setResult] = useState<OptimizeResponse | null>(null);
   const [selectedCluster, setSelectedCluster] = useState<number | null>(null);
+  // Jornada resaltada dentro del cluster seleccionado; null = todas.
+  const [selectedDay, setSelectedDay] = useState<number | null>(null);
   const [loading, setLoading] = useState(false);
+
+  const selectCluster = useCallback((cluster: number | null) => {
+    setSelectedCluster(cluster);
+    setSelectedDay(null);
+  }, []);
+
+  const selectRoute = useCallback((cluster: number | null, day: number | null) => {
+    setSelectedCluster(cluster);
+    setSelectedDay(day);
+  }, []);
+
+  // Puntos de partida asignados, para dibujarlos en el mapa: una base mal
+  // cargada se ve al instante en vez de manifestarse como "no entra nada".
+  const starts = Object.entries(clusterStarts).map(([cluster, start]) => ({
+    cluster: Number(cluster),
+    ...start,
+  }));
   const [error, setError] = useState<string | null>(null);
 
   // Los clusters de una vista previa vieja no necesariamente corresponden a
@@ -78,6 +97,7 @@ export default function Home() {
       setLoading(true);
       setError(null);
       setSelectedCluster(null);
+      setSelectedDay(null);
       setFile(picked);
       clearPreview();
 
@@ -119,6 +139,7 @@ export default function Home() {
     setLoading(true);
     setError(null);
     setSelectedCluster(null);
+    setSelectedDay(null);
 
     try {
       setPreview(await previewClusters(file, mapping, params));
@@ -138,6 +159,7 @@ export default function Home() {
     setLoading(true);
     setError(null);
     setSelectedCluster(null);
+    setSelectedDay(null);
 
     try {
       setResult(await optimize(file, mapping, params, routing, clusterStarts));
@@ -172,6 +194,7 @@ export default function Home() {
             loading={loading}
             error={error}
             selectedCluster={selectedCluster}
+            selectedDay={selectedDay}
             onFile={handleFile}
             onMappingChange={setMapping}
             onParamsChange={handleParamsChange}
@@ -180,7 +203,7 @@ export default function Home() {
             onClusterStartsChange={setClusterStarts}
             onPreview={handlePreview}
             onOptimize={handleOptimize}
-            onSelectCluster={setSelectedCluster}
+            onSelectRoute={selectRoute}
           />
         </aside>
 
@@ -190,8 +213,10 @@ export default function Home() {
             routes={result?.routes ?? []}
             clusters={result?.clusters ?? []}
             depots={depots}
+            starts={starts}
             selectedCluster={selectedCluster}
-            onSelectCluster={setSelectedCluster}
+            selectedDay={selectedDay}
+            onSelectCluster={selectCluster}
           />
         </section>
       </div>

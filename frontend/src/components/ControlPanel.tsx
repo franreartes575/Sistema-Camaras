@@ -14,7 +14,7 @@ import type {
   UploadExcelResponse,
 } from "@/lib/api";
 import DepotEditor from "@/components/DepotEditor";
-import { NOISE_INK, SERIES_BASE, SERIES_SELECTED } from "@/lib/vizTokens";
+import { DEPOT_INK, NOISE_INK, SERIES_BASE, SERIES_SELECTED } from "@/lib/vizTokens";
 
 type Props = {
   upload: UploadExcelResponse | null;
@@ -28,6 +28,7 @@ type Props = {
   loading: boolean;
   error: string | null;
   selectedCluster: number | null;
+  selectedDay: number | null;
   onFile: (file: File) => void;
   onMappingChange: (mapping: ColumnMapping) => void;
   onParamsChange: (params: ClusterParams) => void;
@@ -36,7 +37,8 @@ type Props = {
   onClusterStartsChange: (starts: Record<number, ClusterStart>) => void;
   onPreview: () => void;
   onOptimize: () => void;
-  onSelectCluster: (cluster: number | null) => void;
+  /** Resalta una jornada (cluster + día); `(null, null)` deselecciona. */
+  onSelectRoute: (cluster: number | null, day: number | null) => void;
 };
 
 /** Formatea metros como km con un decimal, o como metros redondos si es corto. */
@@ -236,6 +238,7 @@ export default function ControlPanel({
   loading,
   error,
   selectedCluster,
+  selectedDay,
   onFile,
   onMappingChange,
   onParamsChange,
@@ -244,7 +247,7 @@ export default function ControlPanel({
   onClusterStartsChange,
   onPreview,
   onOptimize,
-  onSelectCluster,
+  onSelectRoute,
 }: Props) {
   const columns = upload?.columns ?? [];
   const hasCoords =
@@ -587,6 +590,7 @@ export default function ControlPanel({
                 [SERIES_SELECTED, "Seleccionado"],
                 [SERIES_BASE, "En cluster"],
                 [NOISE_INK, "Ruido"],
+                [DEPOT_INK, "Salida"],
               ] as const
             ).map(([color, label]) => (
               <span key={label} className="flex items-center gap-1.5">
@@ -601,26 +605,33 @@ export default function ControlPanel({
 
           <ul className="max-h-72 space-y-1 overflow-y-auto">
             {result.routes.map((route) => {
-              const active = route.cluster_id === selectedCluster;
+              const active =
+                route.cluster_id === selectedCluster && route.vehicle_day === selectedDay;
               const cluster = result.clusters.find((c) => c.id === route.cluster_id);
               return (
                 <li key={`${route.cluster_id}-${route.vehicle_day}`}>
                   <button
                     type="button"
-                    onClick={() => onSelectCluster(active ? null : route.cluster_id)}
+                    onClick={() =>
+                      active
+                        ? onSelectRoute(null, null)
+                        : onSelectRoute(route.cluster_id, route.vehicle_day)
+                    }
                     className={`w-full rounded-md px-3 py-1.5 text-left text-sm transition ${
                       active
                         ? "bg-orange-500/20 text-orange-200 ring-1 ring-orange-500/50"
                         : "bg-slate-900 text-slate-300 hover:bg-slate-800"
                     }`}
                   >
-                    <span className="flex items-center justify-between">
+                    <span className="block">
                       <span className="font-medium">
-                        Cluster {route.cluster_id}
-                        {route.vehicle_day_count > 1 &&
-                          ` · día ${route.vehicle_day}/${route.vehicle_day_count}`}
+                        Día {route.vehicle_day}
+                        <span className="font-normal text-slate-500">
+                          {" "}
+                          · cluster {route.cluster_id}
+                        </span>
                       </span>
-                      <span className="text-xs text-slate-400">
+                      <span className="block text-xs text-slate-400">
                         {route.stop_count} paradas ·{" "}
                         {formatDistance(route.total_distance_m)} ·{" "}
                         {formatDuration(route.total_duration_s)}
@@ -647,7 +658,7 @@ export default function ControlPanel({
                       {route.stops.map((stop) => (
                         <li key={stop.camera_id} className="flex justify-between gap-2">
                           <span className="truncate">
-                            {stop.order + 1}. {stop.label ?? stop.camera_id}
+                            {route.vehicle_day}·{stop.order + 1}. {stop.label ?? stop.camera_id}
                           </span>
                           {stop.order > 0 && (
                             <span className="shrink-0 tabular-nums text-slate-500">

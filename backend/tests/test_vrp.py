@@ -151,6 +151,45 @@ def test_total_duration_incluye_tiempo_de_servicio() -> None:
 
 
 # --------------------------------------------------------------------------
+# Sentido del recorrido: la parada más lejana primero
+# --------------------------------------------------------------------------
+
+# Tres cámaras en línea hacia el norte: a ~1, ~2 y ~3 km del depósito.
+CAM_1KM = (-34.5910, -58.3816)
+CAM_2KM = (-34.5820, -58.3816)
+CAM_3KM = (-34.5730, -58.3816)
+
+
+def test_la_camara_mas_lejana_va_en_la_primera_mitad() -> None:
+    """Se sale hacia lo más lejano y se vuelve acercándose a la base."""
+    plan = build_day_routes(
+        [DEPOT, CAM_1KM, CAM_2KM, CAM_3KM],
+        HaversineProvider(average_speed_kmh=40),
+        day_budget_s=DAY_BUDGET_8H,
+        service_time_s=SERVICE_10MIN,
+        time_limit_s=2,
+    )
+
+    assert len(plan.routes) == 1
+    orden = [stop.index for stop in plan.routes[0].stops]
+    assert orden == [3, 2, 1]
+
+
+def test_el_orden_de_las_paradas_es_correlativo() -> None:
+    """`order` numera las paradas 0..n-1 en el sentido final del recorrido."""
+    plan = build_day_routes(
+        [DEPOT, CAM_1KM, CAM_2KM, CAM_3KM],
+        HaversineProvider(average_speed_kmh=40),
+        day_budget_s=DAY_BUDGET_8H,
+        service_time_s=SERVICE_10MIN,
+        time_limit_s=2,
+    )
+
+    assert [stop.order for stop in plan.routes[0].stops] == [0, 1, 2]
+    assert plan.routes[0].stops[0].distance_from_previous_m > 3000
+
+
+# --------------------------------------------------------------------------
 # Tope de cámaras por jornada
 # --------------------------------------------------------------------------
 

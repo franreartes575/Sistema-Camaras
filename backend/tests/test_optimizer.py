@@ -444,6 +444,26 @@ def test_optimize_presupuesto_imposible_avisa_camaras_fuera(client: TestClient) 
     assert "MIC-1" in body["warning"]
 
 
+def test_optimize_punto_de_partida_absurdo_es_error_explicito(
+    client: TestClient,
+) -> None:
+    """Lat/lon invertidas dejan la base a miles de km: se rechaza diciéndolo."""
+    filas = [
+        {"id_camara": "MIC-0", "latitud": -34.6000, "longitud": -58.3816},
+        {"id_camara": "MIC-1", "latitud": -34.6001, "longitud": -58.3816},
+    ]
+    buffer = io.BytesIO()
+    pd.DataFrame(filas).to_excel(buffer, index=False, engine="openpyxl")
+
+    invertido = json.dumps({"0": {"lat": -58.3816, "lon": -34.6000, "name": "Base"}})
+    response = optimizar(client, buffer.getvalue(), cluster_starts_json=invertido)
+
+    assert response.status_code == 422
+    detalle = response.json()["detail"]
+    assert "cluster 0" in detalle
+    assert "invertidas" in detalle
+
+
 # --------------------------------------------------------------------------
 # Regresiones de la revisión de código
 # --------------------------------------------------------------------------

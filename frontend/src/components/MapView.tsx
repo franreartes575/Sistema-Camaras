@@ -12,7 +12,7 @@ import {
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import "maplibre-gl/dist/maplibre-gl.css";
 
-import type { Camera, Cluster, ClusterRoute, Depot } from "@/lib/api";
+import type { Camera, Cluster, ClusterRoute, ClusterStart, Depot } from "@/lib/api";
 import { circlePolygon } from "@/lib/geo";
 import { OSM_STYLE } from "@/lib/mapStyle";
 import {
@@ -23,12 +23,18 @@ import {
   SERIES_SELECTED,
 } from "@/lib/vizTokens";
 
+/** Punto de partida asignado a un cluster, tal como se va a mandar al backend. */
+export type StartPoint = ClusterStart & { cluster: number };
+
 type Props = {
   cameras: Camera[];
   routes: ClusterRoute[];
   clusters: Cluster[];
   depots: Depot[];
+  starts: StartPoint[];
   selectedCluster: number | null;
+  /** Jornada resaltada dentro de `selectedCluster`; null = todas sus jornadas. */
+  selectedDay: number | null;
   onSelectCluster: (cluster: number | null) => void;
 };
 
@@ -38,27 +44,39 @@ type HoverInfo = {
   id: string;
   label: string | null;
   cluster: number;
+  day: number | null;
   stop: number | null;
 };
 
+type StopRef = { day: number; order: number };
+type LatLon = { lat: number; lon: number };
+
 const POINTS_LAYER = "camaras-punto";
+
+// Opacidad de los recorridos no seleccionados mientras hay una jornada
+// resaltada: siguen visibles como contexto pero no compiten con ella.
+const DIMMED_OPACITY = 0.3;
 
 export default function MapView({
   cameras,
   routes,
   clusters,
   depots,
+  starts,
   selectedCluster,
+  selectedDay,
   onSelectCluster,
 }: Props) {
   const mapRef = useRef<MapRef | null>(null);
   const [hover, setHover] = useState<HoverInfo | null>(null);
 
-  /** Posición de cada cámara dentro del recorrido de su cluster. */
+  /** Jornada y posición de cada cámara dentro de su recorrido. */
   const stopByCamera = useMemo(() => {
-    const map = new Map<string, number>();
+    const map = new Map<string, StopRef>();
     for (const route of routes) {
-      for (const stop of route.stops) map.set(stop.camera_id, stop.order);
+      for (const stop of route.stops) {
+        map.set(stop.camera_id, { day: route.vehicle_day, order: stop.order });
+      }
     }
     return map;
   }, [routes]);
@@ -75,13 +93,16 @@ export default function MapView({
             id: camera.id,
             label: camera.label ?? "",
             cluster: camera.cluster,
+            day: stop?.day ?? -1,
             reassigned: camera.reassigned,
-            stop: stop ?? -1,
-            // Con ruta, el rótulo es el orden de visita; sin ruta, el cluster.
+            stop: stop?.order ?? -1,
+            // Con ruta, el rótulo es "día·orden de visita"; sin ruta, el cluster.
             tag:
               camera.cluster === -1
                 ? "·"
-                : String(stop !== undefined ? stop + 1 : camera.cluster),
+                : stop
+                  ? `${stop.day}·${stop.order + 1}`
+                  : String(camera.cluster),
           },
         };
       }),
@@ -113,6 +134,21 @@ export default function MapView({
     [depots],
   );
 
+  const startPoints = useMemo(
+    () => ({
+      type: "FeatureCollection" as const,
+      features: starts.map((start) => ({
+        type: "Feature" as const,
+        geometry: { type: "Point" as const, coordinates: [start.lon, start.lat] },
+        properties: {
+          cluster: start.cluster,
+          name: `Salida C${start.cluster}${start.name ? ` · ${start.name}` : ""}`,
+        },
+      })),
+    }),
+    [starts],
+  );
+
   const lines = useMemo(
     () => ({
       type: "FeatureCollection" as const,
@@ -124,19 +160,23 @@ export default function MapView({
             type: "LineString" as const,
             coordinates: route.geometry.map(([lat, lon]) => [lon, lat]),
           },
-          properties: { cluster: route.cluster_id },
+          properties: {
+            cluster: route.cluster_id,
+            day: route.vehicle_day,
+            label: `Día ${route.vehicle_day}`,
+          },
         })),
     }),
     [routes],
   );
 
   /** Encuadra el mapa sobre el conjunto de puntos que se le pase. */
-  const fitTo = useCallback((subset: Camera[], maxZoom: number) => {
+  const fitTo = useCallback((subset: LatLon[], maxZoom: number) => {
     const map = mapRef.current;
     if (!map || subset.length === 0) return;
 
-    const lats = subset.map((camera) => camera.lat);
-    const lons = subset.map((camera) => camera.lon);
+    const lats = subset.map((point) => point.lat);
+    const lons = subset.map((point) => point.lon);
     const bounds: LngLatBoundsLike = [
       [Math.min(...lons), Math.min(...lats)],
       [Math.max(...lons), Math.max(...lats)],
@@ -153,16 +193,27 @@ export default function MapView({
     fitTo(enRuta.length > 0 ? enRuta : cameras, 15);
   }, [cameras, fitTo]);
 
-  // Al elegir un cluster, acercarse a el. Sin esto, una sola parada lejana
-  // obliga a alejar tanto el mapa que los recorridos quedan de un pixel y
-  // parece que no se dibujo nada.
+  // Al elegir un cluster o una jornada, acercarse a ella (incluida la salida).
+  // Sin esto, una sola parada lejana obliga a alejar tanto el mapa que los
+  // recorridos quedan de un pixel y parece que no se dibujo nada.
   useEffect(() => {
     if (selectedCluster === null) return;
+    const route =
+      selectedDay === null
+        ? undefined
+        : routes.find(
+            (candidate) =>
+              candidate.cluster_id === selectedCluster && candidate.vehicle_day === selectedDay,
+          );
+    if (route) {
+      fitTo([...route.stops, { lat: route.start_lat, lon: route.start_lon }], 16);
+      return;
+    }
     fitTo(
       cameras.filter((camera) => camera.cluster === selectedCluster),
       16,
     );
-  }, [selectedCluster, cameras, fitTo]);
+  }, [selectedCluster, selectedDay, routes, cameras, fitTo]);
 
   const handleClick = useCallback(
     (event: { features?: { properties?: Record<string, unknown> }[] }) => {
@@ -189,44 +240,62 @@ export default function MapView({
       }
       const properties = feature.properties ?? {};
       const stop = Number(properties.stop);
+      const day = Number(properties.day);
       setHover({
         lat: event.lngLat.lat,
         lon: event.lngLat.lng,
         id: String(properties.id ?? ""),
         label: properties.label ? String(properties.label) : null,
         cluster: Number(properties.cluster),
+        day: day >= 1 ? day : null,
         stop: stop >= 0 ? stop : null,
       });
     },
     [],
   );
 
+  /** Condición MapLibre "pertenece al cluster seleccionado", o null sin selección. */
+  const clusterMatch = useMemo(
+    () => (selectedCluster === null ? null : ["==", ["get", "cluster"], selectedCluster]),
+    [selectedCluster],
+  );
+
+  /** Ídem, pero restringida a la jornada seleccionada si hay una. */
+  const selectionMatch = useMemo(() => {
+    if (clusterMatch === null || selectedDay === null) return clusterMatch;
+    return ["all", clusterMatch, ["==", ["get", "day"], selectedDay]];
+  }, [clusterMatch, selectedDay]);
+
+  // Un `case` necesita condicion, resultado y fallback — ["case", color] es
+  // invalido y MapLibre rechaza la capa entera, dejando todo sin dibujar. Por
+  // eso, sin selección, cada propiedad va con un valor liso.
   const fillColor = useMemo(() => {
     const noiseCase = [["==", ["get", "cluster"], -1], NOISE_INK];
-    const selectedCase =
-      selectedCluster === null
-        ? []
-        : [["==", ["get", "cluster"], selectedCluster], SERIES_SELECTED];
+    const selectedCase = selectionMatch === null ? [] : [selectionMatch, SERIES_SELECTED];
     return ["case", ...noiseCase, ...selectedCase, SERIES_BASE];
-  }, [selectedCluster]);
+  }, [selectionMatch]);
 
-  const lineColor = useMemo(() => {
-    // Sin cluster seleccionado no hay nada que distinguir: va un color liso.
-    // Un `case` necesita condicion, resultado y fallback — ["case", color] es
-    // invalido y MapLibre rechaza la capa entera, dejando las rutas sin dibujar.
-    if (selectedCluster === null) return SERIES_BASE;
-    return [
-      "case",
-      ["==", ["get", "cluster"], selectedCluster],
-      SERIES_SELECTED,
-      SERIES_BASE,
-    ];
-  }, [selectedCluster]);
+  const lineColor = useMemo(
+    () =>
+      selectionMatch === null
+        ? SERIES_BASE
+        : ["case", selectionMatch, SERIES_SELECTED, SERIES_BASE],
+    [selectionMatch],
+  );
 
-  // Mismo color que las rutas/puntos: el límite no agrega una categoría de
-  // color nueva, sólo resalta el cluster seleccionado (mismo guard que
-  // lineColor contra el ["case", color] invalido).
-  const boundaryColor = lineColor;
+  const lineOpacity = useMemo(
+    () =>
+      selectionMatch === null ? 0.9 : ["case", selectionMatch, 0.95, DIMMED_OPACITY],
+    [selectionMatch],
+  );
+
+  // El límite del cluster se resalta por cluster, nunca por jornada: el
+  // círculo no tiene propiedad `day`.
+  const boundaryColor = useMemo(
+    () =>
+      clusterMatch === null ? SERIES_BASE : ["case", clusterMatch, SERIES_SELECTED, SERIES_BASE],
+    [clusterMatch],
+  );
 
   return (
     <MapLibreMap
@@ -273,7 +342,12 @@ export default function MapView({
             id="recorridos-halo"
             type="line"
             layout={{ "line-cap": "round", "line-join": "round" }}
-            paint={{ "line-color": MARK_RING, "line-width": 6, "line-opacity": 0.9 }}
+            paint={{
+              "line-color": MARK_RING,
+              "line-width": 6,
+              // eslint-disable-next-line @typescript-eslint/no-explicit-any
+              "line-opacity": lineOpacity as any,
+            }}
           />
           <Layer
             id="recorridos-linea"
@@ -283,7 +357,28 @@ export default function MapView({
               // eslint-disable-next-line @typescript-eslint/no-explicit-any
               "line-color": lineColor as any,
               "line-width": 3,
-              "line-opacity": 0.9,
+              // eslint-disable-next-line @typescript-eslint/no-explicit-any
+              "line-opacity": lineOpacity as any,
+            }}
+          />
+          <Layer
+            id="recorridos-rotulo"
+            type="symbol"
+            minzoom={11}
+            layout={{
+              "symbol-placement": "line",
+              "symbol-spacing": 280,
+              "text-field": ["get", "label"],
+              "text-font": ["Noto Sans Bold"],
+              "text-size": 11,
+            }}
+            paint={{
+              // eslint-disable-next-line @typescript-eslint/no-explicit-any
+              "text-color": lineColor as any,
+              "text-halo-color": MARK_RING,
+              "text-halo-width": 2,
+              // eslint-disable-next-line @typescript-eslint/no-explicit-any
+              "text-opacity": lineOpacity as any,
             }}
           />
         </Source>
@@ -357,6 +452,39 @@ export default function MapView({
         </Source>
       )}
 
+      {starts.length > 0 && (
+        <Source id="salidas" type="geojson" data={startPoints}>
+          <Layer
+            id="salidas-punto"
+            type="circle"
+            paint={{
+              // Anillo verde con centro blanco: misma categoría que las sedes
+              // ("acá sale un vehículo") pero distinguible cuando no coinciden.
+              "circle-radius": 9,
+              "circle-color": MARK_RING,
+              "circle-stroke-width": 4,
+              "circle-stroke-color": DEPOT_INK,
+            }}
+          />
+          <Layer
+            id="salidas-rotulo"
+            type="symbol"
+            layout={{
+              "text-field": ["get", "name"],
+              "text-font": ["Noto Sans Bold"],
+              "text-size": 11,
+              "text-offset": [0, -1.4],
+              "text-anchor": "bottom",
+            }}
+            paint={{
+              "text-color": DEPOT_INK,
+              "text-halo-color": MARK_RING,
+              "text-halo-width": 1.5,
+            }}
+          />
+        </Source>
+      )}
+
       {hover && (
         <Popup
           longitude={hover.lon}
@@ -371,6 +499,7 @@ export default function MapView({
             {hover.label && <div className="text-slate-600">{hover.label}</div>}
             <div className="text-slate-600">
               {hover.cluster === -1 ? "Sin cluster (ruido)" : `Cluster ${hover.cluster}`}
+              {hover.day !== null && ` · día ${hover.day}`}
               {hover.stop !== null && ` · parada ${hover.stop + 1}`}
             </div>
           </div>

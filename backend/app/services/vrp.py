@@ -155,29 +155,64 @@ def _solve(
     return manager, routing, solution
 
 
-def _extract_route(
-    manager,
-    routing,
-    solution,
-    vehicle: int,
+def _vehicle_nodes(manager, routing, solution, vehicle: int) -> list[int]:
+    """Cámaras (nodos) que visita un vehículo, en orden; vacía si no se usó."""
+    nodes: list[int] = []
+    index = solution.Value(routing.NextVar(routing.Start(vehicle)))
+    while not routing.IsEnd(index):
+        nodes.append(manager.IndexToNode(index))
+        index = solution.Value(routing.NextVar(index))
+    return nodes
+
+
+def _loop_duration(nodes: list[int], durations_s: np.ndarray, service_time_s: float) -> float:
+    """Duración del circuito base → nodes → base, con servicio en cada parada."""
+    path = [0, *nodes, 0]
+    driving = sum(durations_s[a][b] for a, b in zip(path, path[1:]))
+    return float(driving) + service_time_s * len(nodes)
+
+
+def _farthest_first(
+    nodes: list[int],
+    durations_s: np.ndarray,
+    service_time_s: float,
+    day_budget_s: float,
+) -> list[int]:
+    """Orienta el circuito para visitar la cámara más lejana en la primera mitad.
+
+    Un circuito cerrado cuesta lo mismo (o casi, si la red vial es asimétrica)
+    en los dos sentidos, así que el optimizador elige uno al azar. Salir
+    primero hacia lo más lejano es el criterio operativo: el tramo largo se
+    hace con la cuadrilla descansada y, si la jornada se estira, lo que queda
+    pendiente está cerca de la base. Sólo se invierte si el sentido inverso
+    sigue entrando en el presupuesto.
+    """
+    if len(nodes) < 2:
+        return nodes
+    farthest = max(nodes, key=lambda node: durations_s[0][node])
+    if nodes.index(farthest) <= (len(nodes) - 1) / 2:
+        return nodes
+    reversed_nodes = nodes[::-1]
+    reversed_duration = _loop_duration(reversed_nodes, durations_s, service_time_s)
+    if not math.isfinite(reversed_duration) or reversed_duration > day_budget_s:
+        return nodes
+    return reversed_nodes
+
+
+def _build_route(
+    nodes: list[int],
     distances_m: np.ndarray,
     durations_s: np.ndarray,
     service_time_s: float,
-) -> DayRoute | None:
-    """Lee el recorrido de un vehículo de la solución; None si no se usó."""
-    start = routing.Start(vehicle)
-    if solution.Value(routing.NextVar(start)) == routing.End(vehicle):
-        return None
-
+) -> DayRoute:
+    """Arma el `DayRoute` de un circuito base → nodes → base."""
     stops: list[Stop] = []
     total_distance = 0.0
     total_duration = 0.0
     unreachable = False
-    previous_node = manager.IndexToNode(start)
-    index = solution.Value(routing.NextVar(start))
+    previous_node = 0
 
-    while not routing.IsEnd(index):
-        node = manager.IndexToNode(index)
+    for node in nodes:
         leg_distance = distances_m[previous_node][node]
         leg_duration = durations_s[previous_node][node]
         reachable = bool(np.isfinite(leg_distance))
@@ -196,7 +231,6 @@ def _extract_route(
             )
         )
         previous_node = node
-        index = solution.Value(routing.NextVar(index))
 
     # Tramo de vuelta al punto de partida: cuenta para el total, no se
     # lista como parada.
@@ -246,11 +280,11 @@ def _solve_plan(
 
     routes = []
     for vehicle in range(num_vehicles):
-        route = _extract_route(
-            manager, routing, solution, vehicle, distances_m, durations_s, service_time_s
-        )
-        if route is not None:
-            routes.append(route)
+        nodes = _vehicle_nodes(manager, routing, solution, vehicle)
+        if not nodes:
+            continue  # vehículo sin uso
+        oriented = _farthest_first(nodes, durations_s, service_time_s, day_budget_s)
+        routes.append(_build_route(oriented, distances_m, durations_s, service_time_s))
 
     visited = {stop.index for route in routes for stop in route.stops}
     unserved = tuple(node for node in range(1, len(points)) if node not in visited)
