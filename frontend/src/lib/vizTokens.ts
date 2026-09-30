@@ -23,3 +23,11 @@ export const NOISE_INK = "#52514e";
 
 /** Halo blanco: separa los puntos entre si y del mapa de fondo. */
 export const MARK_RING = "#ffffff";
+
+/**
+ * Tinta para sedes / puntos de partida. Las sedes son un conjunto chico y
+ * acotado (a diferencia de los clusters, sin límite), así que un color propio
+ * no choca con la regla de arriba: no identifica un cluster, identifica una
+ * categoría nueva ("acá sale un vehículo").
+ */
+export const DEPOT_INK = "#1fb17a";

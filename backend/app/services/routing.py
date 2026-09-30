@@ -9,7 +9,7 @@ vienen las cámaras. OSRM espera `lon,lat`, y esa inversión se hace acá adentr
 """
 
 import math
-from typing import Protocol, Sequence
+from typing import NamedTuple, Protocol, Sequence
 
 import numpy as np
 import requests
@@ -19,8 +19,22 @@ from .clustering import haversine_km
 
 Point = tuple[float, float]
 
-# OSRM rechaza matrices por encima de su `max-table-size` (100 por defecto).
-OSRM_MAX_TABLE_SIZE = 100
+# Velocidad promedio asumida cuando no hay OSRM: convierte la distancia en
+# línea recta de HaversineProvider a una duración estimada.
+DEFAULT_AVERAGE_SPEED_KMH = 35.0
+
+
+class TravelMatrices(NamedTuple):
+    """Distancias (m) y duraciones (s) entre cada par de puntos, mismo índice."""
+
+    distances_m: np.ndarray
+    durations_s: np.ndarray
+
+# OSRM rechaza matrices por encima de su `max-table-size`. Tiene que
+# coincidir con el flag del mismo nombre en osrm/docker-compose.yml — subir
+# uno sin el otro deja a este chequeo desincronizado del límite real del
+# motor. El costo de la matriz crece al cuadrado con la cantidad de puntos.
+OSRM_MAX_TABLE_SIZE = 1000
 
 # Un timeout corto: el motor corre en localhost, si no responde es que no está.
 OSRM_TIMEOUT_S = 10
@@ -43,6 +57,15 @@ class ClusterTooLargeError(RoutingError):
     """
 
 
+class BudgetInfeasibleError(RoutingError):
+    """Ninguna cantidad de vehículos cubre el cluster dentro del presupuesto.
+
+    Igual que `ClusterTooLargeError`: es un problema del input (presupuesto
+    de jornada muy chico, o el punto de partida está demasiado lejos), no del
+    servicio — reintentar no lo arregla, hay que ajustar los parámetros.
+    """
+
+
 class RoutingProvider(Protocol):
     """Fuente de distancias entre puntos y de la geometría que los une."""
 
@@ -51,6 +74,10 @@ class RoutingProvider(Protocol):
 
     def distance_matrix(self, points: Sequence[Point]) -> np.ndarray:
         """Matriz cuadrada de distancias en metros."""
+        ...
+
+    def travel_matrix(self, points: Sequence[Point]) -> TravelMatrices:
+        """Distancias (m) y duraciones (s) por calle entre cada par de puntos."""
         ...
 
     def route_geometry(self, points: Sequence[Point]) -> list[Point]:
@@ -69,6 +96,9 @@ class HaversineProvider:
     name = "haversine"
     is_road_network = False
 
+    def __init__(self, average_speed_kmh: float = DEFAULT_AVERAGE_SPEED_KMH) -> None:
+        self.average_speed_kmh = average_speed_kmh
+
     def distance_matrix(self, points: Sequence[Point]) -> np.ndarray:
         """Distancia esférica entre cada par de puntos."""
         if not points:
@@ -81,6 +111,17 @@ class HaversineProvider:
         for index, (lat0, lon0) in enumerate(points):
             matrix[index] = haversine_km(lats, lons, lat0, lon0) * 1000.0
         return matrix
+
+    def travel_matrix(self, points: Sequence[Point]) -> TravelMatrices:
+        """Duración estimada a partir de la distancia en línea recta.
+
+        No hay forma de medir un tiempo de manejo real sin OSRM: se aplica
+        `average_speed_kmh` de forma pareja a toda la matriz, así que subestima
+        igual que la distancia misma.
+        """
+        distances_m = self.distance_matrix(points)
+        speed_m_s = self.average_speed_kmh * 1000.0 / 3600.0
+        return TravelMatrices(distances_m, distances_m / speed_m_s)
 
     def route_geometry(self, points: Sequence[Point]) -> list[Point]:
         """Sin red de calles, el recorrido es la poligonal entre los puntos."""
@@ -140,16 +181,39 @@ class OsrmProvider:
             f"{self.base_url}/table/v1/{self.profile}/{self._coords(points)}",
             params={"annotations": "distance"},
         )
+        return self._parse_matrix(payload, "distances")
 
-        distances = payload.get("distances")
-        if not distances:
-            raise RoutingError("OSRM no devolvió matriz de distancias.")
+    def travel_matrix(self, points: Sequence[Point]) -> TravelMatrices:
+        """Distancias y duraciones por calle vía el servicio `table` de OSRM."""
+        if not points:
+            return TravelMatrices(np.zeros((0, 0)), np.zeros((0, 0)))
 
-        # OSRM marca con null los pares que no puede conectar por la red vial.
+        if len(points) > OSRM_MAX_TABLE_SIZE:
+            raise ClusterTooLargeError(
+                f"El cluster tiene {len(points)} cámaras y OSRM acepta hasta "
+                f"{OSRM_MAX_TABLE_SIZE} por matriz. Reduzca el radio de "
+                f"vecindad (eps_km) para obtener clusters más chicos."
+            )
+
+        payload = self._get(
+            f"{self.base_url}/table/v1/{self.profile}/{self._coords(points)}",
+            params={"annotations": "distance,duration"},
+        )
+        return TravelMatrices(
+            self._parse_matrix(payload, "distances"),
+            self._parse_matrix(payload, "durations"),
+        )
+
+    def _parse_matrix(self, payload: dict, key: str) -> np.ndarray:
+        """Convierte una matriz de OSRM (con `null` en pares inalcanzables) a numpy."""
+        rows = payload.get(key)
+        if not rows:
+            raise RoutingError(f"OSRM no devolvió matriz de {key}.")
+
         return np.array(
             [
                 [np.inf if value is None else float(value) for value in row]
-                for row in distances
+                for row in rows
             ]
         )
 
@@ -189,30 +253,36 @@ class OsrmProvider:
         return payload
 
 
-def select_provider(preference: str = "auto") -> tuple[RoutingProvider, str | None]:
+def select_provider(
+    preference: str = "auto", average_speed_kmh: float = DEFAULT_AVERAGE_SPEED_KMH
+) -> tuple[RoutingProvider, str | None]:
     """Elige el proveedor y explica la elección.
 
     Devuelve el proveedor y una advertencia cuando hubo que degradar a línea
     recta, para que la interfaz pueda avisarle al usuario que esas distancias
-    no son de manejo.
+    (y duraciones) no son de manejo. `average_speed_kmh` sólo se usa si se
+    degrada: es la velocidad asumida para estimar duración sin OSRM.
     """
     if preference == "haversine":
-        return HaversineProvider(), None
+        return HaversineProvider(average_speed_kmh), None
 
     osrm = OsrmProvider()
 
     if preference == "osrm":
         if not osrm.is_available():
+            # Sin la URL interna: quien llame a select_provider() puede no
+            # pasar por el manejador que sanea RoutingError antes de
+            # responder al cliente (hoy sólo /optimize/ lo hace).
             raise RoutingError(
-                f"OSRM no responde en {osrm.base_url}. Levante el motor de "
-                f"ruteo o use el proveedor 'haversine'."
+                "El motor de ruteo local no responde. Levántelo o use el "
+                "proveedor 'haversine'."
             )
         return osrm, None
 
     if osrm.is_available():
         return osrm, None
 
-    return HaversineProvider(), (
-        f"OSRM no responde en {osrm.base_url}: las distancias son en línea "
-        f"recta y subestiman el recorrido real por calle."
+    return HaversineProvider(average_speed_kmh), (
+        "El motor de ruteo local no responde: las distancias son en línea "
+        "recta y subestiman el recorrido real por calle."
     )

@@ -1,14 +1,19 @@
 "use client";
 
 import type {
+  Cluster,
   ClusterParams,
+  ClusterStart,
   ColumnMapping,
   CoordOrder,
+  Depot,
   OptimizeResponse,
+  ProcessResponse,
   ProviderChoice,
   RouteParams,
   UploadExcelResponse,
 } from "@/lib/api";
+import DepotEditor from "@/components/DepotEditor";
 import { NOISE_INK, SERIES_BASE, SERIES_SELECTED } from "@/lib/vizTokens";
 
 type Props = {
@@ -16,6 +21,9 @@ type Props = {
   mapping: ColumnMapping;
   params: ClusterParams;
   routing: RouteParams;
+  depots: Depot[];
+  preview: ProcessResponse | null;
+  clusterStarts: Record<number, ClusterStart>;
   result: OptimizeResponse | null;
   loading: boolean;
   error: string | null;
@@ -24,6 +32,9 @@ type Props = {
   onMappingChange: (mapping: ColumnMapping) => void;
   onParamsChange: (params: ClusterParams) => void;
   onRoutingChange: (routing: RouteParams) => void;
+  onDepotsChange: (depots: Depot[]) => void;
+  onClusterStartsChange: (starts: Record<number, ClusterStart>) => void;
+  onPreview: () => void;
   onOptimize: () => void;
   onSelectCluster: (cluster: number | null) => void;
 };
@@ -33,6 +44,14 @@ function formatDistance(meters: number | null): string {
   // null significa que la red vial no conecta el tramo, no que mida cero.
   if (meters === null) return "sin conexión";
   return meters >= 1000 ? `${(meters / 1000).toFixed(1)} km` : `${Math.round(meters)} m`;
+}
+
+/** Formatea segundos como "Xh Ym" (o sólo minutos si dura menos de una hora). */
+function formatDuration(seconds: number): string {
+  const totalMinutes = Math.round(seconds / 60);
+  const hours = Math.floor(totalMinutes / 60);
+  const minutes = totalMinutes % 60;
+  return hours === 0 ? `${minutes} min` : `${hours} h ${minutes} min`;
 }
 
 function Select({
@@ -130,11 +149,89 @@ function Slider({
   );
 }
 
+/** Un cluster + el selector de su punto de partida (sede guardada o manual). */
+function ClusterStartRow({
+  cluster,
+  depots,
+  start,
+  onChange,
+}: {
+  cluster: Cluster;
+  depots: Depot[];
+  start: ClusterStart | undefined;
+  onChange: (start: ClusterStart) => void;
+}) {
+  const matchedDepot = depots.find(
+    (depot) =>
+      start && depot.lat === start.lat && depot.lon === start.lon && depot.name === start.name,
+  );
+  const mode = start === undefined ? "" : matchedDepot ? matchedDepot.id : "custom";
+
+  return (
+    <li className="space-y-1.5 rounded-md bg-slate-900 p-2">
+      <div className="flex items-center justify-between text-xs text-slate-400">
+        <span className="font-medium text-slate-200">Cluster {cluster.id}</span>
+        <span>
+          {cluster.size} cámaras · radio {cluster.radius_km.toFixed(1)} km
+        </span>
+      </div>
+      <select
+        value={mode}
+        onChange={(event) => {
+          const value = event.target.value;
+          if (value === "custom") {
+            onChange({
+              lat: cluster.centroid_lat,
+              lon: cluster.centroid_lon,
+              name: null,
+            });
+            return;
+          }
+          const depot = depots.find((candidate) => candidate.id === value);
+          if (depot) onChange({ lat: depot.lat, lon: depot.lon, name: depot.name });
+        }}
+        className="w-full rounded-md border border-slate-700 bg-slate-950 px-2 py-1 text-sm text-slate-100 focus:border-sky-500 focus:outline-none"
+      >
+        <option value="" disabled>
+          — elegir punto de partida —
+        </option>
+        {depots.map((depot) => (
+          <option key={depot.id} value={depot.id}>
+            {depot.name || "Sede sin nombre"}
+          </option>
+        ))}
+        <option value="custom">Coordenadas personalizadas</option>
+      </select>
+      {mode === "custom" && start && (
+        <div className="grid grid-cols-2 gap-2">
+          <input
+            type="number"
+            step="0.0001"
+            value={start.lat}
+            onChange={(event) => onChange({ ...start, lat: Number(event.target.value) })}
+            className="rounded-md border border-slate-700 bg-slate-950 px-2 py-1 text-sm text-slate-100 focus:border-sky-500 focus:outline-none"
+          />
+          <input
+            type="number"
+            step="0.0001"
+            value={start.lon}
+            onChange={(event) => onChange({ ...start, lon: Number(event.target.value) })}
+            className="rounded-md border border-slate-700 bg-slate-950 px-2 py-1 text-sm text-slate-100 focus:border-sky-500 focus:outline-none"
+          />
+        </div>
+      )}
+    </li>
+  );
+}
+
 export default function ControlPanel({
   upload,
   mapping,
   params,
   routing,
+  depots,
+  preview,
+  clusterStarts,
   result,
   loading,
   error,
@@ -143,6 +240,9 @@ export default function ControlPanel({
   onMappingChange,
   onParamsChange,
   onRoutingChange,
+  onDepotsChange,
+  onClusterStartsChange,
+  onPreview,
   onOptimize,
   onSelectCluster,
 }: Props) {
@@ -151,7 +251,24 @@ export default function ControlPanel({
     mapping.mode === "single"
       ? Boolean(mapping.col_coords)
       : Boolean(mapping.col_lat && mapping.col_lon);
-  const canOptimize = Boolean(mapping.col_id) && hasCoords && !loading;
+  const canPreview = Boolean(mapping.col_id) && hasCoords && !loading;
+  const allStartsAssigned =
+    preview !== null &&
+    preview.clusters.every((cluster) => clusterStarts[cluster.id] !== undefined);
+  const canOptimize = allStartsAssigned && !loading;
+  const missingStarts =
+    preview?.clusters.filter((cluster) => clusterStarts[cluster.id] === undefined)
+      .length ?? 0;
+  // Visible bajo el botón: con sólo un `title` el motivo del bloqueo no se ve.
+  const optimizeHint = !preview
+    ? "Primero tocá «Agrupar cámaras»."
+    : missingStarts > 0
+      ? `Elegí el punto de partida de ${missingStarts} cluster(s) en «Punto de partida por cluster».`
+      : null;
+
+  const setClusterStart = (clusterId: number, start: ClusterStart) => {
+    onClusterStartsChange({ ...clusterStarts, [clusterId]: start });
+  };
 
   return (
     <div className="space-y-5">
@@ -262,8 +379,12 @@ export default function ControlPanel({
 
           <div className="space-y-3 border-t border-slate-800 pt-4">
             <h2 className="text-xs font-semibold uppercase tracking-wide text-slate-500">
-              Agrupamiento
+              Agrupamiento de cámaras remotas
             </h2>
+            <p className="text-xs text-slate-500">
+              Sólo afecta a cámaras sin ninguna sede alcanzable: cómo se
+              agrupan entre sí por cercanía antes de armarles recorridos.
+            </p>
             <Slider
               label="Radio de vecindad"
               value={params.eps_km}
@@ -282,7 +403,53 @@ export default function ControlPanel({
               step={1}
               onChange={(min_samples) => onParamsChange({ ...params, min_samples })}
             />
+            <Slider
+              label="Reasignación de ruido"
+              value={params.noise_reassign_factor}
+              display={`× ${params.noise_reassign_factor} eps`}
+              min={0}
+              max={10}
+              step={0.5}
+              onChange={(noise_reassign_factor) =>
+                onParamsChange({ ...params, noise_reassign_factor })
+              }
+            />
+            <button
+              type="button"
+              onClick={onPreview}
+              disabled={!canPreview}
+              className="w-full rounded-md bg-slate-700 px-3 py-2 text-sm font-medium text-white transition hover:bg-slate-600 disabled:cursor-not-allowed disabled:bg-slate-800 disabled:text-slate-500"
+            >
+              {loading ? "Agrupando…" : "Agrupar cámaras"}
+            </button>
           </div>
+
+          <DepotEditor depots={depots} onChange={onDepotsChange} />
+
+          {preview && (
+            <div className="space-y-2.5 border-t border-slate-800 pt-4">
+              <h2 className="text-xs font-semibold uppercase tracking-wide text-slate-500">
+                Punto de partida por cluster
+              </h2>
+              {preview.clusters.length === 0 ? (
+                <p className="text-xs text-slate-500">
+                  No se formó ningún cluster con estos parámetros.
+                </p>
+              ) : (
+                <ul className="space-y-2">
+                  {preview.clusters.map((cluster) => (
+                    <ClusterStartRow
+                      key={cluster.id}
+                      cluster={cluster}
+                      depots={depots}
+                      start={clusterStarts[cluster.id]}
+                      onChange={(start) => setClusterStart(cluster.id, start)}
+                    />
+                  ))}
+                </ul>
+              )}
+            </div>
+          )}
 
           <div className="space-y-3 border-t border-slate-800 pt-4">
             <h2 className="text-xs font-semibold uppercase tracking-wide text-slate-500">
@@ -300,18 +467,54 @@ export default function ControlPanel({
                 onRoutingChange({ ...routing, provider: value as ProviderChoice })
               }
             />
-            <label className="flex items-center gap-2 text-xs text-slate-400">
-              <input
-                id="round-trip"
-                type="checkbox"
-                checked={routing.round_trip}
-                onChange={(event) =>
-                  onRoutingChange({ ...routing, round_trip: event.target.checked })
-                }
-                className="accent-sky-500"
-              />
-              Volver al punto de partida
-            </label>
+            <Slider
+              label="Presupuesto de jornada"
+              value={routing.day_budget_s / 3600}
+              display={`${(routing.day_budget_s / 3600).toFixed(1)} h`}
+              min={1}
+              max={16}
+              step={0.5}
+              onChange={(hours) =>
+                onRoutingChange({ ...routing, day_budget_s: hours * 3600 })
+              }
+            />
+            <Slider
+              label="Cámaras por día"
+              value={routing.max_stops_per_day}
+              display={
+                routing.max_stops_per_day === 0
+                  ? "sin tope"
+                  : `máx. ${routing.max_stops_per_day}`
+              }
+              min={0}
+              max={30}
+              step={1}
+              onChange={(max_stops_per_day) =>
+                onRoutingChange({ ...routing, max_stops_per_day })
+              }
+            />
+            <Slider
+              label="Tiempo de servicio por parada"
+              value={routing.service_time_s / 60}
+              display={`${routing.service_time_s / 60} min`}
+              min={0}
+              max={60}
+              step={5}
+              onChange={(minutes) =>
+                onRoutingChange({ ...routing, service_time_s: minutes * 60 })
+              }
+            />
+            <Slider
+              label="Velocidad asumida sin OSRM"
+              value={routing.average_speed_kmh}
+              display={`${routing.average_speed_kmh} km/h`}
+              min={10}
+              max={120}
+              step={5}
+              onChange={(average_speed_kmh) =>
+                onRoutingChange({ ...routing, average_speed_kmh })
+              }
+            />
             <Slider
               label="Tiempo de cálculo"
               value={routing.time_limit_s}
@@ -326,9 +529,13 @@ export default function ControlPanel({
               onClick={onOptimize}
               disabled={!canOptimize}
               className="w-full rounded-md bg-sky-600 px-3 py-2 text-sm font-medium text-white transition hover:bg-sky-500 disabled:cursor-not-allowed disabled:bg-slate-700 disabled:text-slate-500"
+              title={optimizeHint ?? undefined}
             >
               {loading ? "Optimizando…" : "Optimizar recorridos"}
             </button>
+            {optimizeHint && !loading && (
+              <p className="text-xs text-amber-300">{optimizeHint}</p>
+            )}
           </div>
         </>
       )}
@@ -395,8 +602,9 @@ export default function ControlPanel({
           <ul className="max-h-72 space-y-1 overflow-y-auto">
             {result.routes.map((route) => {
               const active = route.cluster_id === selectedCluster;
+              const cluster = result.clusters.find((c) => c.id === route.cluster_id);
               return (
-                <li key={route.cluster_id}>
+                <li key={`${route.cluster_id}-${route.vehicle_day}`}>
                   <button
                     type="button"
                     onClick={() => onSelectCluster(active ? null : route.cluster_id)}
@@ -407,10 +615,15 @@ export default function ControlPanel({
                     }`}
                   >
                     <span className="flex items-center justify-between">
-                      <span className="font-medium">Cluster {route.cluster_id}</span>
+                      <span className="font-medium">
+                        Cluster {route.cluster_id}
+                        {route.vehicle_day_count > 1 &&
+                          ` · día ${route.vehicle_day}/${route.vehicle_day_count}`}
+                      </span>
                       <span className="text-xs text-slate-400">
                         {route.stop_count} paradas ·{" "}
-                        {formatDistance(route.total_distance_m)}
+                        {formatDistance(route.total_distance_m)} ·{" "}
+                        {formatDuration(route.total_duration_s)}
                         {route.has_unreachable_legs && (
                           <span
                             className="ml-1 text-amber-400"
@@ -421,6 +634,12 @@ export default function ControlPanel({
                         )}
                       </span>
                     </span>
+                    {route.start_name && (
+                      <span className="block text-[11px] text-slate-500">
+                        Desde {route.start_name}
+                        {cluster && ` · radio del cluster ${cluster.radius_km.toFixed(1)} km`}
+                      </span>
+                    )}
                   </button>
 
                   {active && (

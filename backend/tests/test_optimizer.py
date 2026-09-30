@@ -1,6 +1,7 @@
 """Tests de la optimización del orden de visita."""
 
 import io
+import json
 
 import numpy as np
 import pandas as pd
@@ -163,6 +164,21 @@ def planilla() -> bytes:
     return buffer.getvalue()
 
 
+def puntos_de_partida_genericos() -> str:
+    """Cubre de sobra los ids de cluster que pueden salir en estos tests.
+
+    Los ids sólo importan como clave (no hace falta que el punto quede cerca
+    del cluster real): con presupuesto de 8h alcanza igual, y los ids que no
+    correspondan a ningún cluster real simplemente no se usan.
+    """
+    return json.dumps(
+        {
+            str(i): {"lat": -34.6000, "lon": -58.3816, "name": f"Base {i}"}
+            for i in range(10)
+        }
+    )
+
+
 def optimizar(client: TestClient, planilla: bytes, **extra: object):
     """Llama a /optimize/ con el mapeo estándar de las fixtures."""
     data: dict[str, object] = {
@@ -172,6 +188,10 @@ def optimizar(client: TestClient, planilla: bytes, **extra: object):
         "eps_km": 1.0,
         "min_samples": 2,
         "provider": "haversine",
+        "cluster_starts_json": puntos_de_partida_genericos(),
+        "day_budget_s": 8 * 3600,
+        "service_time_s": 0,
+        "average_speed_kmh": 40,
         "time_limit_s": 2,
     }
     data.update(extra)
@@ -230,34 +250,49 @@ def test_optimize_informa_degradacion_en_modo_auto(
 def test_optimize_falla_si_se_exige_osrm_y_no_esta(
     client: TestClient, planilla: bytes, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Pedir OSRM explícitamente sin motor devuelve 503, no rutas falsas."""
+    """Pedir OSRM explícitamente sin motor devuelve 503, no rutas falsas.
+
+    El detalle expuesto al cliente es genérico a propósito: no debe filtrar
+    la URL interna de OSRM (ver CLAUDE.md, "Antes de exponerlo a la red").
+    """
     monkeypatch.setattr(OsrmProvider, "is_available", lambda self: False)
 
     response = optimizar(client, planilla, provider="osrm")
 
     assert response.status_code == 503
-    assert "no responde" in response.json()["detail"]
+    assert "no está disponible" in response.json()["detail"]
+    assert "localhost" not in response.json()["detail"]
 
 
 def test_optimize_propaga_falla_del_motor(
-    client: TestClient, planilla: bytes, monkeypatch: pytest.MonkeyPatch
+    client: TestClient,
+    planilla: bytes,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
 ) -> None:
-    """Si OSRM falla a mitad del cálculo, el error llega traducido."""
+    """Si OSRM falla a mitad del cálculo, se loguea server-side y se sanea.
+
+    El cliente recibe un mensaje genérico; el detalle original ("motor
+    caído") sólo llega al log, nunca a la respuesta HTTP.
+    """
 
     def explota(self, points):
         raise RoutingError("motor caído")
 
     monkeypatch.setattr(OsrmProvider, "is_available", lambda self: True)
-    monkeypatch.setattr(OsrmProvider, "distance_matrix", explota)
+    monkeypatch.setattr(OsrmProvider, "travel_matrix", explota)
 
-    response = optimizar(client, planilla, provider="osrm")
+    with caplog.at_level("WARNING"):
+        response = optimizar(client, planilla, provider="osrm")
 
     assert response.status_code == 503
-    assert "motor caído" in response.json()["detail"]
+    assert "motor caído" not in response.json()["detail"]
+    assert "no está disponible" in response.json()["detail"]
+    assert "motor caído" in caplog.text
 
 
-def test_optimize_excluye_el_ruido(client: TestClient) -> None:
-    """Las cámaras sin cluster no entran en ningún recorrido."""
+def test_optimize_excluye_el_ruido_mas_alla_del_limite(client: TestClient) -> None:
+    """Una cámara a ~600 km queda fuera de cualquier `noise_reassign_factor` razonable."""
     filas = [
         {"id_camara": f"MIC-{i}", "latitud": -34.6000 - i * 0.001, "longitud": -58.3816}
         for i in range(3)
@@ -272,6 +307,33 @@ def test_optimize_excluye_el_ruido(client: TestClient) -> None:
         stop["camera_id"] for route in body["routes"] for stop in route["stops"]
     }
     assert "LEJOS" not in ruteadas
+    assert body["warning"] is not None
+    assert "sin cluster cercano" in body["warning"]
+
+
+def test_optimize_reasigna_ruido_cercano_a_su_recorrido(client: TestClient) -> None:
+    """Una cámara moderadamente lejana se reasigna y aparece en la ruta."""
+    filas = [
+        {"id_camara": f"MIC-{i}", "latitud": -34.6000 - i * 0.001, "longitud": -58.3816}
+        for i in range(3)
+    ] + [
+        # A ~2.2 km del cluster MIC: fuera de eps=1km (ruido) pero dentro del
+        # tope por defecto (eps_km * 3 = 3km).
+        {"id_camara": "CERCANA", "latitud": -34.6000 - 0.02, "longitud": -58.3816}
+    ]
+    buffer = io.BytesIO()
+    pd.DataFrame(filas).to_excel(buffer, index=False, engine="openpyxl")
+
+    body = optimizar(client, buffer.getvalue()).json()
+
+    assert body["stats"]["noise_count"] == 0
+    ruteadas = {
+        stop["camera_id"] for route in body["routes"] for stop in route["stops"]
+    }
+    assert "CERCANA" in ruteadas
+    reassigned_by_id = {camera["id"]: camera["reassigned"] for camera in body["cameras"]}
+    assert reassigned_by_id["CERCANA"] is True
+    assert reassigned_by_id["MIC-0"] is False
 
 
 def test_optimize_rechaza_proveedor_invalido(
@@ -279,6 +341,107 @@ def test_optimize_rechaza_proveedor_invalido(
 ) -> None:
     """`provider` sólo acepta auto, osrm o haversine."""
     assert optimizar(client, planilla, provider="google").status_code == 422
+
+
+# --------------------------------------------------------------------------
+# Puntos de partida por cluster y presupuesto de jornada
+# --------------------------------------------------------------------------
+
+
+def test_optimize_exige_punto_de_partida_para_cada_cluster(
+    client: TestClient, planilla: bytes
+) -> None:
+    """Sin punto de partida para algún cluster, 400 explícito, no un default."""
+    response = optimizar(client, planilla, cluster_starts_json="{}")
+
+    assert response.status_code == 400
+    assert "punto de partida" in response.json()["detail"]
+
+
+def test_optimize_rechaza_json_invalido_en_cluster_starts(
+    client: TestClient, planilla: bytes
+) -> None:
+    """Un cluster_starts_json mal formado no debe explotar el servidor."""
+    response = optimizar(client, planilla, cluster_starts_json="no es json")
+
+    assert response.status_code == 400
+
+
+def test_optimize_respeta_el_punto_de_partida_asignado(client: TestClient) -> None:
+    """El recorrido sale y vuelve al punto de partida indicado, no de la cámara 0."""
+    filas = [
+        {"id_camara": f"MIC-{i}", "latitud": -34.6000 - i * 0.001, "longitud": -58.3816}
+        for i in range(3)
+    ]
+    buffer = io.BytesIO()
+    pd.DataFrame(filas).to_excel(buffer, index=False, engine="openpyxl")
+
+    partida = json.dumps({"0": {"lat": -34.70, "lon": -58.40, "name": "Sede Sur"}})
+    body = optimizar(
+        client, buffer.getvalue(), cluster_starts_json=partida
+    ).json()
+
+    ruta = body["routes"][0]
+    assert ruta["start_name"] == "Sede Sur"
+    assert ruta["start_lat"] == pytest.approx(-34.70)
+    assert ruta["start_lon"] == pytest.approx(-58.40)
+    assert ruta["geometry"][0] == [pytest.approx(-34.70), pytest.approx(-58.40)]
+
+
+def test_optimize_presupuesto_chico_parte_en_varias_jornadas(client: TestClient) -> None:
+    """Un cluster que no entra en una jornada sale en varios `vehicle_day`."""
+    filas = [
+        {"id_camara": "N", "latitud": -34.5910, "longitud": -58.3816},
+        {"id_camara": "S", "latitud": -34.6090, "longitud": -58.3816},
+        {"id_camara": "E", "latitud": -34.6000, "longitud": -58.3706},
+        {"id_camara": "O", "latitud": -34.6000, "longitud": -58.3926},
+    ]
+    buffer = io.BytesIO()
+    pd.DataFrame(filas).to_excel(buffer, index=False, engine="openpyxl")
+
+    partida = json.dumps({"0": {"lat": -34.6000, "lon": -58.3816, "name": "Base"}})
+    body = optimizar(
+        client,
+        buffer.getvalue(),
+        eps_km=5.0,  # las cuatro entran en un solo cluster
+        cluster_starts_json=partida,
+        day_budget_s=20 * 60,
+        service_time_s=600,
+    ).json()
+
+    rutas = [route for route in body["routes"] if route["cluster_id"] == 0]
+    assert len(rutas) >= 2
+    assert {ruta["vehicle_day"] for ruta in rutas} == set(range(1, len(rutas) + 1))
+    assert all(ruta["vehicle_day_count"] == len(rutas) for ruta in rutas)
+    camaras_ruteadas = {
+        stop["camera_id"] for ruta in rutas for stop in ruta["stops"]
+    }
+    assert camaras_ruteadas == {"N", "S", "E", "O"}
+
+
+def test_optimize_presupuesto_imposible_avisa_camaras_fuera(client: TestClient) -> None:
+    """Ni una visita solitaria entra: no aborta, informa qué cámaras quedaron fuera."""
+    filas = [
+        {"id_camara": "MIC-0", "latitud": -34.6000, "longitud": -58.3816},
+        {"id_camara": "MIC-1", "latitud": -34.6001, "longitud": -58.3816},
+    ]
+    buffer = io.BytesIO()
+    pd.DataFrame(filas).to_excel(buffer, index=False, engine="openpyxl")
+
+    partida = json.dumps({"0": {"lat": -34.7000, "lon": -58.5000}})
+    response = optimizar(
+        client,
+        buffer.getvalue(),
+        cluster_starts_json=partida,
+        day_budget_s=1,
+        service_time_s=0,
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["routes"] == []
+    assert "MIC-0" in body["warning"]
+    assert "MIC-1" in body["warning"]
 
 
 # --------------------------------------------------------------------------
@@ -346,7 +509,7 @@ def test_cluster_demasiado_grande_es_error_de_input(
         raise ClusterTooLargeError("El cluster tiene 150 cámaras. Reduzca eps_km.")
 
     monkeypatch.setattr(OsrmProvider, "is_available", lambda self: True)
-    monkeypatch.setattr(OsrmProvider, "distance_matrix", demasiado_grande)
+    monkeypatch.setattr(OsrmProvider, "travel_matrix", demasiado_grande)
 
     response = optimizar(client, planilla, provider="osrm")
 
@@ -364,3 +527,24 @@ def test_rechaza_subida_sobre_el_limite(client: TestClient) -> None:
 
     assert response.status_code == 413
     assert "MB" in response.json()["detail"]
+
+
+def test_optimize_respeta_tope_de_camaras_por_dia(
+    client: TestClient, planilla: bytes
+) -> None:
+    """Con tope 3, cada zona de cuatro cámaras sale en dos jornadas."""
+    body = optimizar(client, planilla, max_stops_per_day=3).json()
+
+    assert all(route["stop_count"] <= 3 for route in body["routes"])
+    for cluster_id in (0, 1):
+        dias = [r for r in body["routes"] if r["cluster_id"] == cluster_id]
+        assert len(dias) == 2
+        assert {r["vehicle_day_count"] for r in dias} == {2}
+        assert sum(r["stop_count"] for r in dias) == 4
+
+
+def test_optimize_tope_cero_es_sin_limite(client: TestClient, planilla: bytes) -> None:
+    """El valor por defecto (0) no divide las jornadas."""
+    body = optimizar(client, planilla, max_stops_per_day=0).json()
+
+    assert len(body["routes"]) == 2

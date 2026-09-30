@@ -6,10 +6,14 @@ import { useCallback, useState } from "react";
 import ControlPanel from "@/components/ControlPanel";
 import {
   optimize,
+  previewClusters,
   uploadExcel,
   type ClusterParams,
+  type ClusterStart,
   type ColumnMapping,
+  type Depot,
   type OptimizeResponse,
+  type ProcessResponse,
   type RouteParams,
   type UploadExcelResponse,
 } from "@/lib/api";
@@ -39,45 +43,94 @@ export default function Home() {
   const [upload, setUpload] = useState<UploadExcelResponse | null>(null);
   const [mapping, setMapping] = useState<ColumnMapping>(EMPTY_MAPPING);
   // 5 km agrupa una ciudad entera; con 1 km casi nada llega a formar grupo.
-  const [params, setParams] = useState<ClusterParams>({ eps_km: 5, min_samples: 2 });
+  const [params, setParams] = useState<ClusterParams>({
+    eps_km: 5,
+    min_samples: 2,
+    noise_reassign_factor: 3,
+  });
   const [routing, setRouting] = useState<RouteParams>({
     provider: "auto",
-    round_trip: false,
+    day_budget_s: 8 * 3600,
+    service_time_s: 15 * 60,
+    average_speed_kmh: 35,
     time_limit_s: 5,
+    max_stops_per_day: 5,
   });
+  const [depots, setDepots] = useState<Depot[]>([]);
+  const [preview, setPreview] = useState<ProcessResponse | null>(null);
+  const [clusterStarts, setClusterStarts] = useState<Record<number, ClusterStart>>({});
   const [result, setResult] = useState<OptimizeResponse | null>(null);
   const [selectedCluster, setSelectedCluster] = useState<number | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  const handleFile = useCallback(async (picked: File) => {
+  // Los clusters de una vista previa vieja no necesariamente corresponden a
+  // los de la nueva: forzar a reasignar puntos de partida en vez de arrastrar
+  // asignaciones que podrían apuntar a un cluster distinto.
+  const clearPreview = useCallback(() => {
+    setPreview(null);
+    setClusterStarts({});
+    setResult(null);
+  }, []);
+
+  const handleFile = useCallback(
+    async (picked: File) => {
+      setLoading(true);
+      setError(null);
+      setSelectedCluster(null);
+      setFile(picked);
+      clearPreview();
+
+      try {
+        const response = await uploadExcel(picked);
+        setUpload(response);
+        // Precarga el mapeo con lo que el backend logro inferir por nombre.
+        const suggested = response.suggested_mapping;
+        setMapping({
+          col_id: suggested.id ?? response.columns[0] ?? "",
+          mode: suggested.mode,
+          col_lat: suggested.lat ?? "",
+          col_lon: suggested.lon ?? "",
+          col_coords: suggested.coords ?? "",
+          coord_order: "auto",
+          col_label: suggested.label ?? "",
+        });
+      } catch (err) {
+        setUpload(null);
+        setError(err instanceof Error ? err.message : "Error desconocido");
+      } finally {
+        setLoading(false);
+      }
+    },
+    [clearPreview],
+  );
+
+  const handleParamsChange = useCallback(
+    (next: ClusterParams) => {
+      setParams(next);
+      clearPreview();
+    },
+    [clearPreview],
+  );
+
+  const handlePreview = useCallback(async () => {
+    if (!file) return;
+
     setLoading(true);
     setError(null);
-    setResult(null);
     setSelectedCluster(null);
-    setFile(picked);
 
     try {
-      const response = await uploadExcel(picked);
-      setUpload(response);
-      // Precarga el mapeo con lo que el backend logro inferir por nombre.
-      const suggested = response.suggested_mapping;
-      setMapping({
-        col_id: suggested.id ?? response.columns[0] ?? "",
-        mode: suggested.mode,
-        col_lat: suggested.lat ?? "",
-        col_lon: suggested.lon ?? "",
-        col_coords: suggested.coords ?? "",
-        coord_order: "auto",
-        col_label: suggested.label ?? "",
-      });
+      setPreview(await previewClusters(file, mapping, params));
+      setClusterStarts({});
+      setResult(null);
     } catch (err) {
-      setUpload(null);
+      setPreview(null);
       setError(err instanceof Error ? err.message : "Error desconocido");
     } finally {
       setLoading(false);
     }
-  }, []);
+  }, [file, mapping, params]);
 
   const handleOptimize = useCallback(async () => {
     if (!file) return;
@@ -87,14 +140,14 @@ export default function Home() {
     setSelectedCluster(null);
 
     try {
-      setResult(await optimize(file, mapping, params, routing));
+      setResult(await optimize(file, mapping, params, routing, clusterStarts));
     } catch (err) {
       setResult(null);
       setError(err instanceof Error ? err.message : "Error desconocido");
     } finally {
       setLoading(false);
     }
-  }, [file, mapping, params, routing]);
+  }, [file, mapping, params, routing, clusterStarts]);
 
   return (
     <main className="flex h-screen flex-col bg-slate-950 text-slate-100">
@@ -112,14 +165,20 @@ export default function Home() {
             mapping={mapping}
             params={params}
             routing={routing}
+            depots={depots}
+            preview={preview}
+            clusterStarts={clusterStarts}
             result={result}
             loading={loading}
             error={error}
             selectedCluster={selectedCluster}
             onFile={handleFile}
             onMappingChange={setMapping}
-            onParamsChange={setParams}
+            onParamsChange={handleParamsChange}
             onRoutingChange={setRouting}
+            onDepotsChange={setDepots}
+            onClusterStartsChange={setClusterStarts}
+            onPreview={handlePreview}
             onOptimize={handleOptimize}
             onSelectCluster={setSelectedCluster}
           />
@@ -129,6 +188,8 @@ export default function Home() {
           <MapView
             cameras={result?.cameras ?? []}
             routes={result?.routes ?? []}
+            clusters={result?.clusters ?? []}
+            depots={depots}
             selectedCluster={selectedCluster}
             onSelectCluster={setSelectedCluster}
           />

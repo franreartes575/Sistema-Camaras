@@ -17,10 +17,14 @@ _ID_PATTERNS = (
     r"^nro",
     r"n[uú]mero",
     r"contrato",
+    r"device\s*name",  # exportaciones de cnMaestro
+    r"dispositivo",
+    r"c[aá]mara",
 )
 _LAT_PATTERNS = (r"^lat", r"latitud", r"latitude", r"^y$")
 _LON_PATTERNS = (r"^lon", r"^lng", r"longitud", r"longitude", r"^x$")
-_LABEL_PATTERNS = (r"direcc", r"domicilio", r"address", r"nombre", r"descrip")
+# "IP Address" contiene "address" pero no es un domicilio.
+_LABEL_PATTERNS = (r"direcc", r"domicilio", r"^(?!ip\b).*address", r"nombre", r"descrip")
 # Columna única que trae latitud y longitud juntas.
 _COORDS_PATTERNS = (
     r"coordenada",
@@ -32,6 +36,8 @@ _COORDS_PATTERNS = (
     r"geo",
     r"punto",
 )
+# Hasta 1e9 cubre microgrados (1e6) y las exportaciones con más precisión.
+_MAX_COORD_SCALE_EXPONENT = 9
 
 
 def read_dataframe(filename: str, raw: bytes) -> pd.DataFrame:
@@ -107,6 +113,33 @@ def _to_float_series(series: pd.Series) -> pd.Series:
             .str.replace(",", ".", regex=False)
         )
     return pd.to_numeric(series, errors="coerce")
+
+
+def _rescale_integer_coords(
+    lat: pd.Series, lon: pd.Series
+) -> tuple[pd.Series, pd.Series]:
+    """Reinterpreta coordenadas exportadas como enteros escalados.
+
+    cnMaestro y varios GPS guardan microgrados sin punto decimal: -24845092 es
+    -24.845092. Sólo se reescala cuando *todos* los valores de ambas columnas
+    son enteros fuera de rango; un valor suelto fuera de rango entre grados
+    normales sigue siendo un error de carga. Se usa una única escala para las
+    dos columnas, la menor que las vuelve válidas: la longitud, que admite tres
+    dígitos enteros, desempata cuando la latitud sola sería ambigua.
+    """
+    values = pd.concat([lat, lon]).dropna()
+    if values.empty or not (values == values.round()).all():
+        return lat, lon
+    if (lat.dropna().abs() <= 90).any() or (lon.dropna().abs() <= 180).any():
+        return lat, lon
+
+    for exponent in range(1, _MAX_COORD_SCALE_EXPONENT + 1):
+        factor = 10.0**exponent
+        if (lat.dropna().abs() / factor <= 90).all() and (
+            lon.dropna().abs() / factor <= 180
+        ).all():
+            return lat / factor, lon / factor
+    return lat, lon
 
 
 def _to_float(text: str) -> float | None:
@@ -247,8 +280,9 @@ def extract_points(
     if single:
         lat_series, lon_series = _split_coord_column(frame[col_coords], coord_order)
     else:
-        lat_series = _to_float_series(frame[col_lat])
-        lon_series = _to_float_series(frame[col_lon])
+        lat_series, lon_series = _rescale_integer_coords(
+            _to_float_series(frame[col_lat]), _to_float_series(frame[col_lon])
+        )
 
     work = pd.DataFrame(
         {

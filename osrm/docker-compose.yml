@@ -12,7 +12,7 @@ services:
     command: >
       osrm-routed
       --algorithm mld
-      --max-table-size 100
+      --max-table-size 1000
       /data/salta-latest.osrm
     volumes:
       - ./data:/data

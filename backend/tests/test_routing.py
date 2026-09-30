@@ -7,6 +7,7 @@ import pytest
 import requests
 
 from app.services.routing import (
+    DEFAULT_AVERAGE_SPEED_KMH,
     OSRM_MAX_TABLE_SIZE,
     HaversineProvider,
     OsrmProvider,
@@ -65,6 +66,34 @@ def test_haversine_no_es_red_vial() -> None:
     assert HaversineProvider().is_road_network is False
 
 
+def test_haversine_duracion_usa_la_velocidad_configurada() -> None:
+    """Sin OSRM, la duración es distancia/velocidad, con la velocidad pedida."""
+    provider = HaversineProvider(average_speed_kmh=60.0)
+
+    matrices = provider.travel_matrix([OBELISCO, PALERMO])
+
+    esperado_s = matrices.distances_m[0][1] / (60.0 * 1000.0 / 3600.0)
+    assert matrices.durations_s[0][1] == pytest.approx(esperado_s)
+
+
+def test_haversine_duracion_default_usa_velocidad_por_defecto() -> None:
+    """Sin velocidad explícita, usa DEFAULT_AVERAGE_SPEED_KMH."""
+    matrices = HaversineProvider().travel_matrix([OBELISCO, PALERMO])
+
+    esperado_s = matrices.distances_m[0][1] / (
+        DEFAULT_AVERAGE_SPEED_KMH * 1000.0 / 3600.0
+    )
+    assert matrices.durations_s[0][1] == pytest.approx(esperado_s)
+
+
+def test_haversine_travel_matrix_sin_puntos() -> None:
+    """Una lista vacía no rompe travel_matrix."""
+    matrices = HaversineProvider().travel_matrix([])
+
+    assert matrices.distances_m.shape == (0, 0)
+    assert matrices.durations_s.shape == (0, 0)
+
+
 # --------------------------------------------------------------------------
 # OsrmProvider — orden de coordenadas y manejo de fallas
 # --------------------------------------------------------------------------
@@ -102,6 +131,58 @@ def test_osrm_traduce_tramos_nulos_a_infinito() -> None:
         matrix = OsrmProvider().distance_matrix([OBELISCO, PALERMO])
 
     assert np.isinf(matrix[0][1])
+
+
+def test_osrm_travel_matrix_pide_distancia_y_duracion() -> None:
+    """travel_matrix anota ambas, no sólo distancia."""
+    payload = {
+        "code": "Ok",
+        "distances": [[0, 5200], [5100, 0]],
+        "durations": [[0, 420], [410, 0]],
+    }
+
+    with patch(
+        "app.services.routing.requests.get", return_value=respuesta_osrm(payload)
+    ) as get:
+        matrices = OsrmProvider().travel_matrix([OBELISCO, PALERMO])
+
+    assert matrices.distances_m[0][1] == 5200
+    assert matrices.durations_s[0][1] == 420
+    assert get.call_args[1]["params"]["annotations"] == "distance,duration"
+
+
+def test_osrm_travel_matrix_traduce_nulos_a_infinito_en_ambas() -> None:
+    """Un tramo sin conexión vial llega como null en distancia y duración."""
+    payload = {
+        "code": "Ok",
+        "distances": [[0, None], [None, 0]],
+        "durations": [[0, None], [None, 0]],
+    }
+
+    with patch(
+        "app.services.routing.requests.get", return_value=respuesta_osrm(payload)
+    ):
+        matrices = OsrmProvider().travel_matrix([OBELISCO, PALERMO])
+
+    assert np.isinf(matrices.distances_m[0][1])
+    assert np.isinf(matrices.durations_s[0][1])
+
+
+def test_osrm_travel_matrix_sin_puntos() -> None:
+    """Una lista vacía no consulta OSRM."""
+    with patch("app.services.routing.requests.get") as get:
+        matrices = OsrmProvider().travel_matrix([])
+
+    assert matrices.distances_m.shape == (0, 0)
+    get.assert_not_called()
+
+
+def test_osrm_travel_matrix_rechaza_cluster_mas_grande_que_la_matriz() -> None:
+    """Mismo límite de tamaño que distance_matrix."""
+    puntos = [OBELISCO] * (OSRM_MAX_TABLE_SIZE + 1)
+
+    with pytest.raises(RoutingError, match="eps_km"):
+        OsrmProvider().travel_matrix(puntos)
 
 
 def test_osrm_geometria_vuelve_como_lat_lon() -> None:
@@ -182,6 +263,15 @@ def test_select_auto_degrada_con_aviso_si_osrm_no_responde() -> None:
     assert provider.name == "haversine"
     assert warning is not None
     assert "línea" in warning
+
+
+def test_select_auto_degrada_propaga_velocidad_configurada() -> None:
+    """El proveedor de línea recta usa la velocidad pedida, no la default."""
+    with patch.object(OsrmProvider, "is_available", return_value=False):
+        provider, _ = select_provider("auto", average_speed_kmh=80.0)
+
+    assert isinstance(provider, HaversineProvider)
+    assert provider.average_speed_kmh == 80.0
 
 
 def test_select_auto_usa_osrm_si_responde() -> None:

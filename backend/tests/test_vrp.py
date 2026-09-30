@@ -1,0 +1,204 @@
+"""Tests del ruteo con presupuesto de jornada y punto de partida externo."""
+
+from app.services.routing import HaversineProvider
+from app.services.vrp import build_day_routes
+
+DEPOT = (-34.6000, -58.3816)
+# Cuatro cámaras a ~1 km del depósito, en direcciones distintas: agruparlas
+# de a varias en un mismo vehículo sale caro en manejo, así que un
+# presupuesto horario chico las fuerza a repartirse en vehículos separados.
+CAM_N = (-34.5910, -58.3816)
+CAM_S = (-34.6090, -58.3816)
+CAM_E = (-34.6000, -58.3706)
+CAM_W = (-34.6000, -58.3926)
+# ~550 km al sur: ida y vuelta a 40 km/h supera de lejos las 8 horas.
+CAM_LEJANA = (-39.5000, -58.3816)
+
+DAY_BUDGET_8H = 8 * 3600
+SERVICE_10MIN = 600
+
+
+def test_todas_las_camaras_entran_en_un_solo_vehiculo() -> None:
+    """Con presupuesto amplio, un cluster chico sale en un solo recorrido."""
+    points = [DEPOT, CAM_N, CAM_S, CAM_E, CAM_W]
+
+    plan = build_day_routes(
+        points,
+        HaversineProvider(average_speed_kmh=40),
+        day_budget_s=DAY_BUDGET_8H,
+        service_time_s=SERVICE_10MIN,
+        time_limit_s=2,
+    )
+
+    assert len(plan.routes) == 1
+    assert len(plan.routes[0].stops) == 4
+    assert plan.unserved == ()
+
+
+def test_todas_las_camaras_aparecen_una_sola_vez() -> None:
+    """Ninguna cámara se pierde ni se duplica entre los vehículos-jornada."""
+    points = [DEPOT, CAM_N, CAM_S, CAM_E, CAM_W]
+
+    plan = build_day_routes(
+        points,
+        HaversineProvider(average_speed_kmh=40),
+        day_budget_s=DAY_BUDGET_8H,
+        service_time_s=SERVICE_10MIN,
+        time_limit_s=2,
+    )
+
+    visitados = sorted(stop.index for route in plan.routes for stop in route.stops)
+    assert visitados == [1, 2, 3, 4]
+
+
+def test_presupuesto_chico_reparte_en_varios_vehiculos() -> None:
+    """Si no entra todo en una jornada, se arman varios recorridos."""
+    points = [DEPOT, CAM_N, CAM_S, CAM_E, CAM_W]
+    # Ida y vuelta a una sola cámara (~90s a 40km/h) + 10 min de servicio
+    # entra holgado en 20 minutos; combinar dos cámaras lejanas entre sí, no.
+    presupuesto_ajustado = 20 * 60
+
+    plan = build_day_routes(
+        points,
+        HaversineProvider(average_speed_kmh=40),
+        day_budget_s=presupuesto_ajustado,
+        service_time_s=SERVICE_10MIN,
+        time_limit_s=2,
+    )
+
+    assert len(plan.routes) >= 2
+    for route in plan.routes:
+        assert route.total_duration_s <= presupuesto_ajustado
+    visitados = sorted(stop.index for route in plan.routes for stop in route.stops)
+    assert visitados == [1, 2, 3, 4]
+    assert plan.unserved == ()
+
+
+def test_camara_que_no_entra_ni_sola_queda_fuera_sin_error() -> None:
+    """Un presupuesto imposible no aborta: la cámara se informa como no cubierta."""
+    plan = build_day_routes(
+        [DEPOT, CAM_N],
+        HaversineProvider(average_speed_kmh=40),
+        day_budget_s=60,
+        service_time_s=SERVICE_10MIN,
+        time_limit_s=2,
+    )
+
+    assert plan.routes == ()
+    assert plan.unserved == (1,)
+
+
+def test_camara_lejana_no_impide_recorrer_las_demas() -> None:
+    """Una cámara fuera de alcance se deja afuera y el resto se recorre igual."""
+    points = [DEPOT, CAM_N, CAM_LEJANA, CAM_S]
+
+    plan = build_day_routes(
+        points,
+        HaversineProvider(average_speed_kmh=40),
+        day_budget_s=DAY_BUDGET_8H,
+        service_time_s=SERVICE_10MIN,
+        time_limit_s=2,
+    )
+
+    assert plan.unserved == (2,)
+    visitadas = sorted(stop.index for route in plan.routes for stop in route.stops)
+    assert visitadas == [1, 3]
+
+
+def test_sin_camaras_devuelve_plan_vacio() -> None:
+    """Un punto de partida sin cámaras asignadas no arma ningún recorrido."""
+    plan = build_day_routes(
+        [DEPOT],
+        HaversineProvider(),
+        day_budget_s=DAY_BUDGET_8H,
+        service_time_s=SERVICE_10MIN,
+    )
+
+    assert plan.routes == ()
+    assert plan.unserved == ()
+
+
+def test_el_punto_de_partida_no_aparece_como_parada() -> None:
+    """`stops` nunca incluye el depósito: no es una cámara a visitar."""
+    points = [DEPOT, CAM_N, CAM_S]
+
+    plan = build_day_routes(
+        points,
+        HaversineProvider(average_speed_kmh=40),
+        day_budget_s=DAY_BUDGET_8H,
+        service_time_s=SERVICE_10MIN,
+        time_limit_s=2,
+    )
+
+    indices = {stop.index for route in plan.routes for stop in route.stops}
+    assert 0 not in indices
+
+
+def test_total_duration_incluye_tiempo_de_servicio() -> None:
+    """El total no es sólo manejo: suma el tiempo de servicio por parada."""
+    plan = build_day_routes(
+        [DEPOT, CAM_N],
+        HaversineProvider(average_speed_kmh=40),
+        day_budget_s=DAY_BUDGET_8H,
+        service_time_s=SERVICE_10MIN,
+        time_limit_s=2,
+    )
+
+    assert len(plan.routes) == 1
+    # Ida y vuelta a ~1km a 40km/h son unos 180s de manejo; con 600s de
+    # servicio el total tiene que ser bastante mayor que el manejo solo.
+    assert plan.routes[0].total_duration_s > 600
+
+
+# --------------------------------------------------------------------------
+# Tope de cámaras por jornada
+# --------------------------------------------------------------------------
+
+# Doce cámaras en una grilla compacta: sin tope entran todas en una jornada.
+GRID = [(-34.6000 + 0.002 * (i // 4), -58.3816 + 0.002 * (i % 4)) for i in range(12)]
+
+
+def test_tope_de_camaras_por_dia_reparte_en_jornadas() -> None:
+    """Con tope 5, doce cámaras salen en exactamente tres jornadas (5+5+2 o similar)."""
+    plan = build_day_routes(
+        [DEPOT, *GRID],
+        HaversineProvider(average_speed_kmh=40),
+        day_budget_s=DAY_BUDGET_8H,
+        service_time_s=SERVICE_10MIN,
+        time_limit_s=2,
+        max_stops_per_day=5,
+    )
+
+    assert len(plan.routes) == 3
+    assert all(len(route.stops) <= 5 for route in plan.routes)
+    visitadas = sorted(stop.index for route in plan.routes for stop in route.stops)
+    assert visitadas == list(range(1, 13))
+
+
+def test_sin_tope_no_cambia_el_comportamiento() -> None:
+    """`max_stops_per_day=None` deja sólo el límite horario."""
+    plan = build_day_routes(
+        [DEPOT, *GRID],
+        HaversineProvider(average_speed_kmh=40),
+        day_budget_s=DAY_BUDGET_8H,
+        service_time_s=SERVICE_10MIN,
+        time_limit_s=2,
+        max_stops_per_day=None,
+    )
+
+    assert len(plan.routes) == 1
+    assert len(plan.routes[0].stops) == 12
+
+
+def test_tope_mayor_que_el_cluster_no_divide() -> None:
+    """Si el tope supera la cantidad de cámaras, sale una sola jornada."""
+    plan = build_day_routes(
+        [DEPOT, CAM_N, CAM_S],
+        HaversineProvider(average_speed_kmh=40),
+        day_budget_s=DAY_BUDGET_8H,
+        service_time_s=SERVICE_10MIN,
+        time_limit_s=2,
+        max_stops_per_day=5,
+    )
+
+    assert len(plan.routes) == 1

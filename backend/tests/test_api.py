@@ -6,6 +6,7 @@ import pandas as pd
 import pytest
 from fastapi.testclient import TestClient
 
+from app import config
 from app.main import app
 
 XLSX_MIME = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
@@ -68,13 +69,13 @@ def planilla_single() -> bytes:
 # --------------------------------------------------------------------------
 
 
-def test_health_informa_osrm(client: TestClient) -> None:
-    """El health expone a qué instancia de OSRM apunta el backend."""
+def test_health_no_expone_configuracion_interna(client: TestClient) -> None:
+    """El health es público a propósito: no debe filtrar la URL de OSRM."""
     response = client.get("/health")
 
     assert response.status_code == 200
     assert response.json()["status"] == "ok"
-    assert "osrm_base_url" in response.json()
+    assert "osrm_base_url" not in response.json()
 
 
 # --------------------------------------------------------------------------
@@ -126,6 +127,78 @@ def test_upload_rechaza_archivo_vacio(client: TestClient) -> None:
     )
 
     assert response.status_code == 400
+
+
+def test_upload_sanea_el_error_de_lectura(
+    client: TestClient, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Un .xlsx corrupto no debe reenviar el detalle crudo de openpyxl.
+
+    El error real (BadZipFile, con detalles de la librería) sólo llega al
+    log del servidor; el cliente recibe un mensaje genérico.
+    """
+    with caplog.at_level("WARNING"):
+        response = client.post(
+            "/upload-excel/",
+            files={"file": ("camaras.xlsx", b"esto no es un xlsx valido", XLSX_MIME)},
+        )
+
+    assert response.status_code == 422
+    assert "zip" not in response.json()["detail"].lower()
+    assert "no se pudo leer la planilla" in response.json()["detail"].lower()
+    assert "zip" in caplog.text.lower()
+
+
+# --------------------------------------------------------------------------
+# API_KEY — auth por header, deshabilitada por defecto
+# --------------------------------------------------------------------------
+
+
+def test_endpoints_no_exigen_api_key_por_defecto(
+    client: TestClient, planilla_split: bytes
+) -> None:
+    """Sin API_KEY configurada (desarrollo local), no hace falta el header."""
+    response = client.post(
+        "/upload-excel/",
+        files={"file": ("camaras.xlsx", planilla_split, XLSX_MIME)},
+    )
+
+    assert response.status_code == 200
+
+
+def test_endpoints_rechazan_api_key_incorrecta(
+    client: TestClient, planilla_split: bytes, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Con API_KEY configurada, el header incorrecto o ausente da 401."""
+    monkeypatch.setattr(config, "API_KEY", "secreta")
+
+    sin_header = client.post(
+        "/upload-excel/",
+        files={"file": ("camaras.xlsx", planilla_split, XLSX_MIME)},
+    )
+    con_clave_mala = client.post(
+        "/upload-excel/",
+        files={"file": ("camaras.xlsx", planilla_split, XLSX_MIME)},
+        headers={"X-API-Key": "otra"},
+    )
+
+    assert sin_header.status_code == 401
+    assert con_clave_mala.status_code == 401
+
+
+def test_endpoints_aceptan_api_key_correcta(
+    client: TestClient, planilla_split: bytes, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Con la clave correcta en el header, el endpoint responde normalmente."""
+    monkeypatch.setattr(config, "API_KEY", "secreta")
+
+    response = client.post(
+        "/upload-excel/",
+        files={"file": ("camaras.xlsx", planilla_split, XLSX_MIME)},
+        headers={"X-API-Key": "secreta"},
+    )
+
+    assert response.status_code == 200
 
 
 # --------------------------------------------------------------------------
@@ -232,3 +305,21 @@ def test_process_sin_coordenadas_validas(client: TestClient) -> None:
 
     assert response.status_code == 422
     assert "mapeo" in response.json()["detail"].lower()
+
+
+def test_process_sanea_el_error_de_lectura(
+    client: TestClient, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Igual que /upload-excel/: un archivo ilegible no filtra detalles internos."""
+    with caplog.at_level("WARNING"):
+        response = client.post(
+            "/process/",
+            files={
+                "file": ("camaras.xlsx", b"esto no es un xlsx valido", XLSX_MIME)
+            },
+            data={"col_id": "id_camara", "col_lat": "lat", "col_lon": "lon"},
+        )
+
+    assert response.status_code == 422
+    assert "zip" not in response.json()["detail"].lower()
+    assert "zip" in caplog.text.lower()

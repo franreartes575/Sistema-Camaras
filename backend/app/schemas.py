@@ -39,6 +39,10 @@ class Camera(BaseModel):
     cluster: int = Field(
         ..., description="Id de cluster DBSCAN; -1 indica punto de ruido"
     )
+    reassigned: bool = Field(
+        False,
+        description="True si era ruido DBSCAN y se reasignó a un cluster cercano",
+    )
 
 
 class Cluster(BaseModel):
@@ -67,7 +71,13 @@ class IngestStats(BaseModel):
     valid_rows: int
     discarded_rows: int
     cluster_count: int
-    noise_count: int = Field(..., description="Cámaras sin cluster (ruido DBSCAN)")
+    noise_count: int = Field(
+        ...,
+        description=(
+            "Cámaras sin recorrido tras intentar reasignar el ruido DBSCAN al "
+            "cluster más cercano"
+        ),
+    )
     eps_km: float
     min_samples: int
     span_km: float = Field(
@@ -111,6 +121,9 @@ class ClusterRoute(BaseModel):
     cluster_id: int
     stop_count: int
     total_distance_m: float
+    total_duration_s: float = Field(
+        ..., description="Manejo real más tiempo de servicio en cada parada"
+    )
     has_unreachable_legs: bool = Field(
         False,
         description=(
@@ -122,6 +135,17 @@ class ClusterRoute(BaseModel):
     geometry: list[list[float]] = Field(
         ..., description="Polilínea del recorrido como pares [lat, lon]"
     )
+    vehicle_day: int = Field(
+        ..., description="Número de jornada/vehículo dentro del cluster, base 1"
+    )
+    vehicle_day_count: int = Field(
+        ..., description="Cuántas jornadas en total le tocaron a este cluster"
+    )
+    start_name: str | None = Field(
+        None, description="Nombre del punto de partida, si se le puso uno"
+    )
+    start_lat: float
+    start_lon: float
 
 
 class OptimizeResponse(BaseModel):

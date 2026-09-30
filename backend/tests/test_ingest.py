@@ -264,3 +264,88 @@ def test_columna_combinada_con_nombre_ambiguo_se_parsea() -> None:
     assert discarded == []
     assert points.iloc[0]["lat"] == pytest.approx(-24.7859)
     assert points.iloc[0]["lon"] == pytest.approx(-65.4117)
+
+
+# --------------------------------------------------------------------------
+# Regresion: exportacion de cnMaestro (planilla de camaras de Martearena)
+# --------------------------------------------------------------------------
+
+CNMAESTRO_COLUMNS = [
+    "Device Name",
+    "IP Address",
+    "Device Type",
+    "MAC",
+    "Latitude",
+    "Longitude",
+    "Nodo a Migrar",
+]
+
+
+def test_sugiere_device_name_como_id_de_camara() -> None:
+    """cnMaestro nombra a la camara en 'Device Name'; no hay otra columna de id."""
+    result = suggest_mapping(CNMAESTRO_COLUMNS)
+
+    assert result["id"] == "Device Name"
+    assert result["lat"] == "Latitude"
+    assert result["lon"] == "Longitude"
+
+
+def test_ip_address_no_es_una_direccion_postal() -> None:
+    """'IP Address' contiene 'address' pero no es un domicilio."""
+    assert suggest_mapping(CNMAESTRO_COLUMNS)["label"] is None
+    assert suggest_mapping(["id", "Address", "lat", "lon"])["label"] == "Address"
+
+
+def test_coordenadas_enteras_escaladas_se_reescalan() -> None:
+    """cnMaestro exporta microgrados sin punto decimal: -24845092 es -24.845092.
+
+    Antes se descartaban todas las filas por 'fuera de rango'.
+    """
+    frame = pd.DataFrame(
+        {
+            "Device Name": ["1-0099", "1-0461", "1-9999"],
+            "Latitude": [-24845092.0, -24828979.0, None],
+            "Longitude": [-65448486.0, -65419006.0, None],
+        }
+    )
+
+    points, discarded = extract_points(frame, "Device Name", "Latitude", "Longitude")
+
+    assert list(points["id"]) == ["1-0099", "1-0461"]
+    assert points.iloc[0]["lat"] == pytest.approx(-24.845092)
+    assert points.iloc[0]["lon"] == pytest.approx(-65.448486)
+    assert discarded == [{"row": 3, "reason": "Coordenada vacía o no numérica"}]
+
+
+def test_escala_comun_la_fija_la_longitud() -> None:
+    """Una latitud de un digito entero admitiria una escala menor; la longitud la desempata."""
+    frame = pd.DataFrame(
+        {"id": ["A"], "lat": [-8500000], "lon": [-65448486]}
+    )
+
+    points, _ = extract_points(frame, "id", "lat", "lon")
+
+    assert points.iloc[0]["lat"] == pytest.approx(-8.5)
+    assert points.iloc[0]["lon"] == pytest.approx(-65.448486)
+
+
+def test_no_reescala_si_hay_coordenadas_en_grados() -> None:
+    """Un valor fuera de rango suelto entre grados normales sigue siendo un error."""
+    frame = pd.DataFrame(
+        {"id": ["A", "B"], "lat": [-24.8, -24845092.0], "lon": [-65.4, -65448486.0]}
+    )
+
+    points, discarded = extract_points(frame, "id", "lat", "lon")
+
+    assert list(points["id"]) == ["A"]
+    assert discarded == [{"row": 2, "reason": "Coordenada fuera de rango válido"}]
+
+
+def test_no_reescala_decimales_fuera_de_rango() -> None:
+    """Sólo los enteros son una escala plausible; 999.5 es simplemente inválido."""
+    frame = pd.DataFrame({"id": ["A"], "lat": [999.5], "lon": [-5800.25]})
+
+    points, discarded = extract_points(frame, "id", "lat", "lon")
+
+    assert points.empty
+    assert discarded[0]["reason"] == "Coordenada fuera de rango válido"

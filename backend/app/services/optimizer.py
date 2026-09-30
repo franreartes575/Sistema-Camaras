@@ -56,8 +56,12 @@ def _to_int_matrix(matrix: np.ndarray) -> list[list[int]]:
     return finite.round().astype(np.int64).tolist()
 
 
-def _search_parameters(time_limit_s: int):
-    """Estrategia de búsqueda: solución inicial golosa y luego mejora local."""
+def default_search_parameters(time_limit_s: int):
+    """Estrategia de búsqueda: solución inicial golosa y luego mejora local.
+
+    Pública porque `vrp.py` la reutiliza para el modelo multi-vehículo: es
+    la misma estrategia de búsqueda, sólo cambia el modelo al que se aplica.
+    """
     parameters = pywrapcp.DefaultRoutingSearchParameters()
     parameters.first_solution_strategy = (
         routing_enums_pb2.FirstSolutionStrategy.PATH_CHEAPEST_ARC
@@ -107,7 +111,7 @@ def solve_order(
     transit = routing.RegisterTransitCallback(distance)
     routing.SetArcCostEvaluatorOfAllVehicles(transit)
 
-    solution = routing.SolveWithParameters(_search_parameters(time_limit_s))
+    solution = routing.SolveWithParameters(default_search_parameters(time_limit_s))
     if solution is None:
         raise RoutingError("OR-Tools no encontró un recorrido válido para este cluster.")
 

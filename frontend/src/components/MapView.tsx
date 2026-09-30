@@ -12,13 +12,22 @@ import {
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import "maplibre-gl/dist/maplibre-gl.css";
 
-import type { Camera, ClusterRoute } from "@/lib/api";
+import type { Camera, Cluster, ClusterRoute, Depot } from "@/lib/api";
+import { circlePolygon } from "@/lib/geo";
 import { OSM_STYLE } from "@/lib/mapStyle";
-import { MARK_RING, NOISE_INK, SERIES_BASE, SERIES_SELECTED } from "@/lib/vizTokens";
+import {
+  DEPOT_INK,
+  MARK_RING,
+  NOISE_INK,
+  SERIES_BASE,
+  SERIES_SELECTED,
+} from "@/lib/vizTokens";
 
 type Props = {
   cameras: Camera[];
   routes: ClusterRoute[];
+  clusters: Cluster[];
+  depots: Depot[];
   selectedCluster: number | null;
   onSelectCluster: (cluster: number | null) => void;
 };
@@ -37,6 +46,8 @@ const POINTS_LAYER = "camaras-punto";
 export default function MapView({
   cameras,
   routes,
+  clusters,
+  depots,
   selectedCluster,
   onSelectCluster,
 }: Props) {
@@ -64,6 +75,7 @@ export default function MapView({
             id: camera.id,
             label: camera.label ?? "",
             cluster: camera.cluster,
+            reassigned: camera.reassigned,
             stop: stop ?? -1,
             // Con ruta, el rótulo es el orden de visita; sin ruta, el cluster.
             tag:
@@ -75,6 +87,30 @@ export default function MapView({
       }),
     }),
     [cameras, stopByCamera],
+  );
+
+  const boundaries = useMemo(
+    () => ({
+      type: "FeatureCollection" as const,
+      features: clusters.map((cluster) => ({
+        type: "Feature" as const,
+        geometry: circlePolygon(cluster.centroid_lat, cluster.centroid_lon, cluster.radius_km),
+        properties: { cluster: cluster.id },
+      })),
+    }),
+    [clusters],
+  );
+
+  const depotPoints = useMemo(
+    () => ({
+      type: "FeatureCollection" as const,
+      features: depots.map((depot) => ({
+        type: "Feature" as const,
+        geometry: { type: "Point" as const, coordinates: [depot.lon, depot.lat] },
+        properties: { name: depot.name || "Sede" },
+      })),
+    }),
+    [depots],
   );
 
   const lines = useMemo(
@@ -187,6 +223,11 @@ export default function MapView({
     ];
   }, [selectedCluster]);
 
+  // Mismo color que las rutas/puntos: el límite no agrega una categoría de
+  // color nueva, sólo resalta el cluster seleccionado (mismo guard que
+  // lineColor contra el ["case", color] invalido).
+  const boundaryColor = lineColor;
+
   return (
     <MapLibreMap
       ref={mapRef}
@@ -201,6 +242,30 @@ export default function MapView({
     >
       <NavigationControl position="top-right" />
       <ScaleControl position="bottom-left" />
+
+      {clusters.length > 0 && (
+        <Source id="limites-cluster" type="geojson" data={boundaries}>
+          <Layer
+            id="limites-cluster-relleno"
+            type="fill"
+            paint={{
+              // eslint-disable-next-line @typescript-eslint/no-explicit-any
+              "fill-color": boundaryColor as any,
+              "fill-opacity": 0.06,
+            }}
+          />
+          <Layer
+            id="limites-cluster-borde"
+            type="line"
+            paint={{
+              // eslint-disable-next-line @typescript-eslint/no-explicit-any
+              "line-color": boundaryColor as any,
+              "line-width": 1.5,
+              "line-opacity": 0.35,
+            }}
+          />
+        </Source>
+      )}
 
       {routes.length > 0 && (
         <Source id="recorridos" type="geojson" data={lines}>
@@ -233,7 +298,10 @@ export default function MapView({
               "circle-radius": ["interpolate", ["linear"], ["zoom"], 8, 4, 14, 9],
               // eslint-disable-next-line @typescript-eslint/no-explicit-any
               "circle-color": fillColor as any,
-              "circle-stroke-width": 2,
+              // Trazo mas grueso para cámaras reasignadas desde ruido — sin
+              // sumar color nuevo, sólo distingue el outlier por contorno.
+              // eslint-disable-next-line @typescript-eslint/no-explicit-any
+              "circle-stroke-width": ["case", ["get", "reassigned"], 3, 2] as any,
               "circle-stroke-color": MARK_RING,
               "circle-opacity": 0.95,
             }}
@@ -251,6 +319,37 @@ export default function MapView({
             }}
             paint={{
               "text-color": "#0b0b0b",
+              "text-halo-color": MARK_RING,
+              "text-halo-width": 1.5,
+            }}
+          />
+        </Source>
+      )}
+
+      {depots.length > 0 && (
+        <Source id="sedes" type="geojson" data={depotPoints}>
+          <Layer
+            id="sedes-punto"
+            type="circle"
+            paint={{
+              "circle-radius": 7,
+              "circle-color": DEPOT_INK,
+              "circle-stroke-width": 2,
+              "circle-stroke-color": MARK_RING,
+            }}
+          />
+          <Layer
+            id="sedes-rotulo"
+            type="symbol"
+            layout={{
+              "text-field": ["get", "name"],
+              "text-font": ["Noto Sans Bold"],
+              "text-size": 11,
+              "text-offset": [0, 1.3],
+              "text-anchor": "top",
+            }}
+            paint={{
+              "text-color": DEPOT_INK,
               "text-halo-color": MARK_RING,
               "text-halo-width": 1.5,
             }}

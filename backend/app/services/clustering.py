@@ -45,6 +45,82 @@ def bounding_span_km(points: pd.DataFrame) -> float:
     )
 
 
+def reassign_noise(
+    points: pd.DataFrame,
+    labels: np.ndarray,
+    clusters: list[dict[str, float | int]],
+    max_km: float,
+) -> tuple[np.ndarray, list[dict[str, float | int]]]:
+    """Reasigna cada punto de ruido al cluster más cercano, dentro de max_km.
+
+    La distancia se mide contra el miembro más cercano de cada cluster, no
+    contra su centroide: un cluster elongado (una avenida larga, por ejemplo)
+    tiene un centroide que no representa su forma, y un punto de ruido cerca
+    de un extremo real del cluster podría parecer más lejano que otro cluster
+    equivocado si se lo midiera sólo contra el centroide.
+
+    Devuelve las etiquetas actualizadas y los clusters con `radius_km`
+    recalculado —contra el centroide original, sin recentroidear— para
+    reflejar los miembros reasignados. El ruido más allá de max_km conserva
+    -1. En caso de empate exacto entre dos clusters, gana el de id más bajo.
+    """
+    if not clusters or points.empty:
+        return labels, clusters
+
+    noise_indices = np.flatnonzero(labels == -1)
+    if len(noise_indices) == 0:
+        return labels, clusters
+
+    new_labels = labels.copy()
+    members_by_cluster = {
+        cluster["id"]: points.loc[labels == cluster["id"]] for cluster in clusters
+    }
+
+    for idx in noise_indices:
+        noise_lat = float(points.iloc[idx]["lat"])
+        noise_lon = float(points.iloc[idx]["lon"])
+
+        best_id: int | None = None
+        best_distance = float("inf")
+        for cluster_id in sorted(members_by_cluster):
+            members = members_by_cluster[cluster_id]
+            distance = haversine_km(
+                members["lat"].to_numpy(dtype=float),
+                members["lon"].to_numpy(dtype=float),
+                noise_lat,
+                noise_lon,
+            ).min()
+            if distance < best_distance:
+                best_distance = distance
+                best_id = int(cluster_id)
+
+        if best_id is not None and best_distance <= max_km:
+            new_labels[idx] = best_id
+
+    updated_clusters: list[dict[str, float | int]] = []
+    for cluster in clusters:
+        member_mask = new_labels == cluster["id"]
+        member_count = int(member_mask.sum())
+        if member_count == cluster["size"]:
+            updated_clusters.append(cluster)
+            continue
+
+        lat_values = points.loc[member_mask, "lat"].to_numpy(dtype=float)
+        lon_values = points.loc[member_mask, "lon"].to_numpy(dtype=float)
+        radius = haversine_km(
+            lat_values, lon_values, cluster["centroid_lat"], cluster["centroid_lon"]
+        )
+        updated_clusters.append(
+            {
+                **cluster,
+                "size": member_count,
+                "radius_km": round(float(radius.max()), 3),
+            }
+        )
+
+    return new_labels, updated_clusters
+
+
 def run_dbscan(
     points: pd.DataFrame, eps_km: float, min_samples: int
 ) -> tuple[np.ndarray, list[dict[str, float | int]]]:

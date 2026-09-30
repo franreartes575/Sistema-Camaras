@@ -4,21 +4,29 @@ Backend FastAPI para optimización de rutas de mantenimiento de cámaras.
 Stack 100% libre: FastAPI + pandas + scikit-learn (DBSCAN) + OR-Tools + OSRM local.
 """
 
+import json
+import logging
+import math
+from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import NamedTuple
+from typing import AsyncIterator, NamedTuple
 
 import anyio
 
-from fastapi import FastAPI, File, Form, HTTPException, UploadFile
+from fastapi import Depends, FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 
 from .config import (
     ALLOWED_UPLOAD_EXTENSIONS,
+    API_KEY,
     CORS_ORIGINS,
     MAX_UPLOAD_BYTES,
-    OSRM_BASE_URL,
+    RATE_LIMIT_OPTIMIZE_MAX,
+    RATE_LIMIT_PROCESS_MAX,
+    RATE_LIMIT_UPLOAD_MAX,
     UPLOAD_CHUNK_BYTES,
 )
+from .security import rate_limiter, require_api_key
 from .schemas import (
     Camera,
     Cluster,
@@ -31,31 +39,58 @@ from .schemas import (
     SuggestedMapping,
     UploadExcelResponse,
 )
-from .services.clustering import bounding_span_km, run_dbscan
+from .services.clustering import bounding_span_km, reassign_noise, run_dbscan
 from .services.ingest import (
     extract_points,
     read_dataframe,
     read_headers,
     suggest_mapping,
 )
-from .services.optimizer import build_route
 from .services.routing import (
+    BudgetInfeasibleError,
     ClusterTooLargeError,
     RoutingError,
     RoutingProvider,
     select_provider,
 )
+from .services.vrp import build_day_routes
 
 # Salta mide unos 600 km de punta a punta. Si las coordenadas leidas abarcan
 # bastante mas que eso, lo mas probable es que el mapeo apunte a columnas que
 # contienen numeros pero no coordenadas.
 MAX_SPAN_PLAUSIBLE_KM = 800.0
 
+logger = logging.getLogger(__name__)
+
+# Un limitador por endpoint, creado una sola vez para que el estado (hits por
+# IP) persista entre requests. El de /optimize/ es el más estricto: es el
+# único que corre OR-Tools.
+_upload_rate_limit = rate_limiter(RATE_LIMIT_UPLOAD_MAX)
+_process_rate_limit = rate_limiter(RATE_LIMIT_PROCESS_MAX)
+_optimize_rate_limit = rate_limiter(RATE_LIMIT_OPTIMIZE_MAX)
+
+
+@asynccontextmanager
+async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
+    """Deja constancia en el log si el servicio arranca sin API_KEY.
+
+    El chequeo queda deshabilitado por defecto para no pedir configuración
+    extra en desarrollo local, pero exponerlo así a la red pasaría
+    desapercibido sin este aviso.
+    """
+    if not API_KEY:
+        logger.warning(
+            "API_KEY no está configurada: los endpoints de escritura no "
+            "exigen autenticación. No exponer así a la red."
+        )
+    yield
+
 
 app = FastAPI(
     title="Sistema Logístico Free",
     description="Optimización de rutas de mantenimiento de cámaras sobre stack libre.",
     version="0.2.0",
+    lifespan=_lifespan,
 )
 
 app.add_middleware(
@@ -69,8 +104,12 @@ app.add_middleware(
 
 @app.get("/health")
 def health() -> dict[str, str]:
-    """Chequeo de vida del servicio y configuración de ruteo."""
-    return {"status": "ok", "osrm_base_url": OSRM_BASE_URL}
+    """Chequeo de vida del servicio, sin autenticación (lo puede pegar un LB).
+
+    No expone `OSRM_BASE_URL`: es infraestructura interna y este endpoint es
+    público a propósito.
+    """
+    return {"status": "ok"}
 
 
 async def _read_upload(file: UploadFile) -> tuple[str, bytes]:
@@ -107,7 +146,11 @@ async def _read_upload(file: UploadFile) -> tuple[str, bytes]:
     return filename, b"".join(chunks)
 
 
-@app.post("/upload-excel/", response_model=UploadExcelResponse)
+@app.post(
+    "/upload-excel/",
+    response_model=UploadExcelResponse,
+    dependencies=[Depends(_upload_rate_limit), Depends(require_api_key)],
+)
 async def upload_excel(file: UploadFile = File(...)) -> UploadExcelResponse:
     """Recibe una planilla y devuelve los encabezados de su primera fila.
 
@@ -118,8 +161,15 @@ async def upload_excel(file: UploadFile = File(...)) -> UploadExcelResponse:
     try:
         columns = read_headers(filename, raw)
     except Exception as exc:  # pandas/openpyxl levantan tipos muy variados
+        # El detalle de pandas/openpyxl puede incluir rutas u otros datos
+        # internos: se loguea server-side, no se reenvía tal cual al cliente.
+        logger.warning("No se pudo leer la planilla '%s': %s", filename, exc)
         raise HTTPException(
-            status_code=422, detail=f"No se pudo leer la planilla: {exc}"
+            status_code=422,
+            detail=(
+                "No se pudo leer la planilla. Verifique que sea un archivo "
+                "Excel (.xlsx/.xlsm) o CSV válido."
+            ),
         ) from exc
 
     if not columns:
@@ -174,6 +224,7 @@ async def _ingest_and_cluster(
     col_label: str | None,
     eps_km: float,
     min_samples: int,
+    noise_reassign_factor: float,
 ) -> Clustered:
     """Lee la planilla, valida las coordenadas y agrupa con DBSCAN."""
     filename, raw = await _read_upload(file)
@@ -181,8 +232,13 @@ async def _ingest_and_cluster(
     try:
         frame = read_dataframe(filename, raw)
     except Exception as exc:
+        logger.warning("No se pudo leer la planilla '%s': %s", filename, exc)
         raise HTTPException(
-            status_code=422, detail=f"No se pudo leer la planilla: {exc}"
+            status_code=422,
+            detail=(
+                "No se pudo leer la planilla. Verifique que sea un archivo "
+                "Excel (.xlsx/.xlsm) o CSV válido."
+            ),
         ) from exc
 
     total_rows = len(frame)
@@ -226,6 +282,9 @@ async def _ingest_and_cluster(
     warning = _mapping_warning(span_km, len(points), total_rows, origen)
 
     labels, clusters = run_dbscan(points, eps_km=eps_km, min_samples=min_samples)
+    original_labels = labels
+    max_reassign_km = eps_km * noise_reassign_factor
+    labels, clusters = reassign_noise(points, labels, clusters, max_km=max_reassign_km)
 
     cameras = [
         Camera(
@@ -234,9 +293,22 @@ async def _ingest_and_cluster(
             lon=float(record["lon"]),
             label=record["label"] if record["label"] else None,
             cluster=int(label),
+            reassigned=bool(original_label == -1 and label != -1),
         )
-        for record, label in zip(points.to_dict("records"), labels, strict=True)
+        for record, label, original_label in zip(
+            points.to_dict("records"), labels, original_labels, strict=True
+        )
     ]
+
+    sin_rutear = sum(1 for camera in cameras if camera.cluster == -1)
+    if sin_rutear:
+        # No hay silencio ante ruido sin cobertura: cada cámara sin recorrido
+        # tiene que quedar explícita, no perderse en las estadísticas.
+        aviso_ruido = (
+            f"{sin_rutear} cámara(s) quedaron sin cluster cercano (a más de "
+            f"{max_reassign_km:,.1f} km) y no entran en ningún recorrido."
+        )
+        warning = f"{warning} {aviso_ruido}" if warning else aviso_ruido
 
     return Clustered(
         filename=filename,
@@ -245,7 +317,7 @@ async def _ingest_and_cluster(
             valid_rows=len(cameras),
             discarded_rows=len(discarded),
             cluster_count=len(clusters),
-            noise_count=sum(1 for camera in cameras if camera.cluster == -1),
+            noise_count=sin_rutear,
             eps_km=eps_km,
             min_samples=min_samples,
             span_km=round(span_km, 1),
@@ -257,7 +329,11 @@ async def _ingest_and_cluster(
     )
 
 
-@app.post("/process/", response_model=ProcessResponse)
+@app.post(
+    "/process/",
+    response_model=ProcessResponse,
+    dependencies=[Depends(_process_rate_limit), Depends(require_api_key)],
+)
 async def process(
     file: UploadFile = File(...),
     col_id: str = Form(...),
@@ -268,6 +344,7 @@ async def process(
     col_label: str | None = Form(None),
     eps_km: float = Form(1.0, gt=0, le=500),
     min_samples: int = Form(2, ge=1, le=1000),
+    noise_reassign_factor: float = Form(3.0, ge=0, le=20),
 ) -> ProcessResponse:
     """Ingesta la planilla completa, valida coordenadas y agrupa con DBSCAN.
 
@@ -288,6 +365,7 @@ async def process(
         col_label,
         eps_km,
         min_samples,
+        noise_reassign_factor,
     )
 
     return ProcessResponse(
@@ -300,39 +378,120 @@ async def process(
     )
 
 
+class ClusterStart(NamedTuple):
+    """Punto de partida asignado a mano a un cluster: una sede o coordenadas sueltas."""
+
+    lat: float
+    lon: float
+    name: str | None
+
+
+def _parse_cluster_starts(raw: str) -> dict[int, ClusterStart]:
+    """Parsea y valida el JSON de puntos de partida por cluster.
+
+    Formato esperado: `{"<cluster_id>": {"lat": ..., "lon": ..., "name": ...}}`.
+    El nombre es opcional; lat/lon no.
+    """
+    try:
+        payload = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise HTTPException(
+            status_code=400, detail="cluster_starts_json no es JSON válido."
+        ) from exc
+
+    if not isinstance(payload, dict):
+        raise HTTPException(
+            status_code=400,
+            detail="cluster_starts_json debe ser un objeto {cluster_id: punto}.",
+        )
+
+    starts: dict[int, ClusterStart] = {}
+    for key, value in payload.items():
+        try:
+            cluster_id = int(key)
+            lat = float(value["lat"])
+            lon = float(value["lon"])
+        except (KeyError, TypeError, ValueError) as exc:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Punto de partida inválido para el cluster '{key}'.",
+            ) from exc
+        if not (math.isfinite(lat) and math.isfinite(lon)):
+            raise HTTPException(
+                status_code=400,
+                detail=f"Coordenadas no finitas para el cluster '{key}'.",
+            )
+        starts[cluster_id] = ClusterStart(lat, lon, value.get("name"))
+    return starts
+
+
 def _route_for_cluster(
     cluster_id: int,
     members: list[Camera],
+    start: ClusterStart,
     provider: RoutingProvider,
-    round_trip: bool,
+    day_budget_s: float,
+    service_time_s: float,
     time_limit_s: int,
-) -> ClusterRoute:
-    """Optimiza el orden de visita de un cluster y arma su respuesta."""
-    points = [(camera.lat, camera.lon) for camera in members]
-    route = build_route(
-        points, provider, round_trip=round_trip, time_limit_s=time_limit_s
-    )
+    max_stops_per_day: int | None = None,
+) -> tuple[list[ClusterRoute], list[Camera]]:
+    """Arma uno o más recorridos (vehículo-jornada) para un cluster.
 
-    stops = [
-        RouteStop(
-            order=stop.order,
-            camera_id=members[stop.index].id,
-            lat=members[stop.index].lat,
-            lon=members[stop.index].lon,
-            label=members[stop.index].label,
-            distance_from_previous_m=stop.distance_from_previous_m,
-        )
-        for stop in route.stops
+    `members[0]` nunca es el punto de partida: se antepone acá y
+    `build_day_routes` lo mantiene fuera de `stops` porque no es una cámara.
+    Devuelve también las cámaras que no entran en ninguna jornada.
+    """
+    points = [(start.lat, start.lon)] + [
+        (camera.lat, camera.lon) for camera in members
     ]
-
-    return ClusterRoute(
-        cluster_id=cluster_id,
-        stop_count=len(stops),
-        total_distance_m=route.total_distance_m,
-        has_unreachable_legs=route.has_unreachable_legs,
-        stops=stops,
-        geometry=[[lat, lon] for lat, lon in route.geometry],
+    plan = build_day_routes(
+        points,
+        provider,
+        day_budget_s=day_budget_s,
+        service_time_s=service_time_s,
+        time_limit_s=time_limit_s,
+        max_stops_per_day=max_stops_per_day,
     )
+
+    unserved = [members[index - 1] for index in plan.unserved]
+    total_days = len(plan.routes)
+    routes: list[ClusterRoute] = []
+    for day_index, day_route in enumerate(plan.routes, start=1):
+        stops = [
+            RouteStop(
+                order=stop.order,
+                camera_id=members[stop.index - 1].id,
+                lat=members[stop.index - 1].lat,
+                lon=members[stop.index - 1].lon,
+                label=members[stop.index - 1].label,
+                distance_from_previous_m=stop.distance_from_previous_m,
+            )
+            for stop in day_route.stops
+        ]
+        ordered_points = (
+            [(start.lat, start.lon)]
+            + [(stop.lat, stop.lon) for stop in stops]
+            + [(start.lat, start.lon)]
+        )
+        routes.append(
+            ClusterRoute(
+                cluster_id=cluster_id,
+                stop_count=len(stops),
+                total_distance_m=day_route.total_distance_m,
+                total_duration_s=day_route.total_duration_s,
+                has_unreachable_legs=day_route.has_unreachable_legs,
+                stops=stops,
+                geometry=[
+                    [lat, lon] for lat, lon in provider.route_geometry(ordered_points)
+                ],
+                vehicle_day=day_index,
+                vehicle_day_count=total_days,
+                start_name=start.name,
+                start_lat=start.lat,
+                start_lon=start.lon,
+            )
+        )
+    return routes, unserved
 
 
 class Solved(NamedTuple):
@@ -345,38 +504,84 @@ class Solved(NamedTuple):
 
 
 def _solve_routes(
-    result: Clustered, preference: str, round_trip: bool, time_limit_s: int
+    result: Clustered,
+    preference: str,
+    day_budget_s: float,
+    service_time_s: float,
+    average_speed_kmh: float,
+    cluster_starts: dict[int, ClusterStart],
+    time_limit_s: int,
+    max_stops_per_day: int | None = None,
 ) -> Solved:
-    """Elige el motor y resuelve cada cluster.
+    """Elige el motor y resuelve cada cluster con presupuesto de jornada.
 
     Es síncrona a propósito: consultar OSRM y correr OR-Tools bloquea, así que
     el endpoint la despacha a un hilo en vez de frenar el event loop.
     """
-    engine, warning = select_provider(preference)
+    engine, warning = select_provider(preference, average_speed_kmh=average_speed_kmh)
 
-    routes = [
-        _route_for_cluster(
+    routes: list[ClusterRoute] = []
+    unserved: list[Camera] = []
+    for cluster in result.clusters:
+        members = [
+            camera for camera in result.cameras if camera.cluster == cluster.id
+        ]
+        if not members:
+            continue
+        cluster_routes, cluster_unserved = _route_for_cluster(
             cluster.id,
-            [camera for camera in result.cameras if camera.cluster == cluster.id],
+            members,
+            cluster_starts[cluster.id],
             engine,
-            round_trip,
+            day_budget_s,
+            service_time_s,
             time_limit_s,
+            max_stops_per_day,
         )
-        for cluster in result.clusters
-    ]
+        routes.extend(cluster_routes)
+        unserved.extend(cluster_unserved)
 
+    avisos = [warning] if warning else []
     unreachable = sum(1 for route in routes if route.has_unreachable_legs)
     if unreachable:
-        aviso = (
+        avisos.append(
             f"{unreachable} recorrido(s) incluyen tramos que la red vial no "
             f"conecta: la distancia total informada subestima la real."
         )
-        warning = f"{warning} {aviso}" if warning else aviso
+    if unserved:
+        avisos.append(_unserved_warning(unserved))
 
-    return Solved(routes, engine.name, engine.is_road_network, warning)
+    return Solved(
+        routes,
+        engine.name,
+        engine.is_road_network,
+        " ".join(avisos) if avisos else None,
+    )
 
 
-@app.post("/optimize/", response_model=OptimizeResponse)
+# Cuántos ids de cámaras sin cubrir se listan en el aviso antes de resumir.
+MAX_UNSERVED_IDS_IN_WARNING = 10
+
+
+def _unserved_warning(unserved: list[Camera]) -> str:
+    """Aviso para las cámaras que no entran en ninguna jornada."""
+    ids = [camera.id for camera in unserved[:MAX_UNSERVED_IDS_IN_WARNING]]
+    resto = len(unserved) - len(ids)
+    listado = ", ".join(ids) + (f" y {resto} más" if resto else "")
+    return (
+        f"{len(unserved)} cámara(s) no entran en ninguna jornada desde su "
+        f"punto de partida (quedan muy lejos o sin conexión vial) y quedaron "
+        f"fuera de los recorridos "
+        f"({listado}). Revise el punto de partida, el presupuesto de jornada "
+        f"o el tiempo de servicio."
+    )
+
+
+@app.post(
+    "/optimize/",
+    response_model=OptimizeResponse,
+    dependencies=[Depends(_optimize_rate_limit), Depends(require_api_key)],
+)
 async def optimize(
     file: UploadFile = File(...),
     col_id: str = Form(...),
@@ -387,15 +592,26 @@ async def optimize(
     col_label: str | None = Form(None),
     eps_km: float = Form(1.0, gt=0, le=500),
     min_samples: int = Form(2, ge=1, le=1000),
+    noise_reassign_factor: float = Form(3.0, ge=0, le=20),
     provider: str = Form("auto", pattern="^(auto|osrm|haversine)$"),
-    round_trip: bool = Form(False),
+    cluster_starts_json: str = Form(...),
+    day_budget_s: float = Form(28800, gt=0, le=86400),
+    service_time_s: float = Form(600, ge=0, le=3600),
+    average_speed_kmh: float = Form(35, gt=0, le=150),
     time_limit_s: int = Form(5, ge=1, le=60),
+    max_stops_per_day: int = Form(0, ge=0, le=100),
 ) -> OptimizeResponse:
     """Agrupa las cámaras y resuelve el orden de visita de cada cluster.
 
-    Con `provider=auto` usa OSRM si responde y cae a línea recta si no,
-    informándolo en `warning`. Las cámaras marcadas como ruido por DBSCAN no
-    entran en ningún recorrido.
+    Cada cluster necesita un punto de partida asignado a mano (una sede
+    guardada o coordenadas sueltas, vía `cluster_starts_json`) — no hay
+    asignación automática. Si un cluster no entra en una jornada con el
+    presupuesto dado, se arman varios recorridos (vehículo-jornada) desde el
+    mismo punto en vez de dejar cámaras sin cubrir. Con `provider=auto` usa
+    OSRM si responde y cae a línea recta (a `average_speed_kmh`) si no,
+    informándolo en `warning`. Las cámaras marcadas como ruido por DBSCAN se
+    reasignan al cluster más cercano dentro de `eps_km * noise_reassign_factor`;
+    las que quedan más allá de ese radio no entran en ningún recorrido.
     """
     result = await _ingest_and_cluster(
         file,
@@ -407,17 +623,52 @@ async def optimize(
         col_label,
         eps_km,
         min_samples,
+        noise_reassign_factor,
     )
+
+    cluster_starts = _parse_cluster_starts(cluster_starts_json)
+    missing = [
+        cluster.id for cluster in result.clusters if cluster.id not in cluster_starts
+    ]
+    if missing:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "Falta el punto de partida para el/los cluster(s): "
+                + ", ".join(str(cluster_id) for cluster_id in missing)
+            ),
+        )
 
     try:
         solved = await anyio.to_thread.run_sync(
-            _solve_routes, result, provider, round_trip, time_limit_s
+            _solve_routes,
+            result,
+            provider,
+            day_budget_s,
+            service_time_s,
+            average_speed_kmh,
+            cluster_starts,
+            time_limit_s,
+            max_stops_per_day or None,  # 0 = sin tope
         )
     except ClusterTooLargeError as exc:
         # Es un problema del input, no del servicio: reintentar no lo arregla.
         raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except BudgetInfeasibleError as exc:
+        # Tampoco es una falla del servicio: el presupuesto/punto de partida
+        # no alcanza, hay que ajustar parámetros, no reintentar.
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
     except RoutingError as exc:
-        raise HTTPException(status_code=503, detail=str(exc)) from exc
+        # El mensaje original puede incluir la URL interna de OSRM: se loguea
+        # server-side pero no se expone al cliente.
+        logger.warning("Fallo del motor de ruteo: %s", exc)
+        raise HTTPException(
+            status_code=503,
+            detail=(
+                "El motor de ruteo no está disponible. Intente nuevamente en "
+                "unos minutos."
+            ),
+        ) from exc
 
     avisos = [a for a in (result.warning, solved.warning) if a]
 

@@ -29,6 +29,8 @@ export type Camera = {
   lon: number;
   label: string | null;
   cluster: number;
+  /** True si era ruido DBSCAN y se reasignó a un cluster cercano. */
+  reassigned: boolean;
 };
 
 export type Cluster = {
@@ -67,11 +69,20 @@ export type ClusterRoute = {
   cluster_id: number;
   stop_count: number;
   total_distance_m: number;
+  /** Manejo real más tiempo de servicio en cada parada. */
+  total_duration_s: number;
   /** True si el total subestima el recorrido por tramos no transitables. */
   has_unreachable_legs: boolean;
   stops: RouteStop[];
   /** Polilinea del recorrido, como pares [lat, lon]. */
   geometry: [number, number][];
+  /** Número de jornada/vehículo dentro del cluster, base 1. */
+  vehicle_day: number;
+  /** Cuántas jornadas en total le tocaron a este cluster. */
+  vehicle_day_count: number;
+  start_name: string | null;
+  start_lat: number;
+  start_lon: number;
 };
 
 export type OptimizeResponse = {
@@ -85,6 +96,21 @@ export type OptimizeResponse = {
   routes: ClusterRoute[];
   discarded: DiscardedRow[];
 };
+
+export type ProcessResponse = {
+  filename: string;
+  warning: string | null;
+  stats: IngestStats;
+  cameras: Camera[];
+  clusters: Cluster[];
+  discarded: DiscardedRow[];
+};
+
+/** Una sede guardada por el usuario — sólo vive en el navegador. */
+export type Depot = { id: string; name: string; lat: number; lon: number };
+
+/** Punto de partida ya resuelto para un cluster (sede guardada o manual). */
+export type ClusterStart = { lat: number; lon: number; name: string | null };
 
 export type ColumnMapping = {
   col_id: string;
@@ -100,12 +126,21 @@ export type ColumnMapping = {
 export type ClusterParams = {
   eps_km: number;
   min_samples: number;
+  /** Radio de reasignación de ruido, como múltiplo de eps_km. */
+  noise_reassign_factor: number;
 };
 
 export type RouteParams = {
   provider: ProviderChoice;
-  round_trip: boolean;
+  /** Presupuesto de jornada, en segundos: manejo + servicio, ida y vuelta. */
+  day_budget_s: number;
+  /** Tiempo fijo de servicio por parada, en segundos. */
+  service_time_s: number;
+  /** Velocidad asumida sin OSRM, para estimar duración en línea recta. */
+  average_speed_kmh: number;
   time_limit_s: number;
+  /** Tope de cámaras por jornada; 0 = sin tope (sólo corta por tiempo). */
+  max_stops_per_day: number;
 };
 
 async function post<T>(path: string, body: FormData): Promise<T> {
@@ -141,11 +176,27 @@ function mappingFields(file: File, mapping: ColumnMapping, params: ClusterParams
   if (mapping.col_label) body.append("col_label", mapping.col_label);
   body.append("eps_km", String(params.eps_km));
   body.append("min_samples", String(params.min_samples));
+  body.append("noise_reassign_factor", String(params.noise_reassign_factor));
   return body;
 }
 
 /**
- * Agrupa las camaras y resuelve el orden de visita de cada cluster.
+ * Agrupa las camaras sin resolver recorridos: vista previa de los clusters.
+ *
+ * Es el paso 1 de 2 — con los clusters ya formados, el usuario les asigna un
+ * punto de partida antes de pedir /optimize/. No toca OSRM.
+ */
+export function previewClusters(
+  file: File,
+  mapping: ColumnMapping,
+  params: ClusterParams,
+): Promise<ProcessResponse> {
+  return post<ProcessResponse>("/process/", mappingFields(file, mapping, params));
+}
+
+/**
+ * Resuelve el orden de visita de cada cluster dentro del presupuesto de
+ * jornada, a partir del punto de partida que el usuario le asignó a cada uno.
  *
  * El archivo se reenvia en cada llamada: el backend no guarda estado, asi que
  * reajustar los parametros es simplemente volver a postear.
@@ -155,10 +206,15 @@ export function optimize(
   mapping: ColumnMapping,
   params: ClusterParams,
   routing: RouteParams,
+  clusterStarts: Record<number, ClusterStart>,
 ): Promise<OptimizeResponse> {
   const body = mappingFields(file, mapping, params);
   body.append("provider", routing.provider);
-  body.append("round_trip", String(routing.round_trip));
+  body.append("cluster_starts_json", JSON.stringify(clusterStarts));
+  body.append("day_budget_s", String(routing.day_budget_s));
+  body.append("service_time_s", String(routing.service_time_s));
+  body.append("average_speed_kmh", String(routing.average_speed_kmh));
   body.append("time_limit_s", String(routing.time_limit_s));
+  body.append("max_stops_per_day", String(routing.max_stops_per_day));
   return post<OptimizeResponse>("/optimize/", body);
 }
