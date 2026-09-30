@@ -6,6 +6,7 @@ import pytest
 from app.services.ingest import (
     extract_points,
     parse_coord_cell,
+    split_done,
     suggest_mapping,
 )
 
@@ -349,3 +350,113 @@ def test_no_reescala_decimales_fuera_de_rango() -> None:
 
     assert points.empty
     assert discarded[0]["reason"] == "Coordenada fuera de rango válido"
+
+
+# --------------------------------------------------------------------------
+# Seguimiento: nodo preliminar, observación y "Realizado"
+# --------------------------------------------------------------------------
+
+# Encabezados del Excel que exporta la app (ver services/export.py).
+EXPORT_COLUMNS = [
+    "ID de la cámara",
+    "Fecha de planificación",
+    "Orden",
+    "Realizado",
+    "Observación",
+    "Nodo al cual se migró",
+    "Nodo preliminar",
+    "Latitud",
+    "Longitud",
+]
+
+
+def test_sugiere_el_mapeo_del_excel_exportado() -> None:
+    """El Excel que exporta la app se vuelve a subir sin mapear nada a mano."""
+    result = suggest_mapping(EXPORT_COLUMNS)
+
+    assert result["id"] == "ID de la cámara"
+    assert result["lat"] == "Latitud"
+    assert result["lon"] == "Longitud"
+    assert result["node"] == "Nodo preliminar"
+    assert result["observation"] == "Observación"
+    assert result["done"] == "Realizado"
+
+
+def test_nodo_a_migrar_de_cnmaestro_es_el_nodo_preliminar() -> None:
+    """En la planilla original el nodo preliminar se llama "Nodo a Migrar"."""
+    result = suggest_mapping(CNMAESTRO_COLUMNS)
+
+    assert result["node"] == "Nodo a Migrar"
+    assert result["done"] is None
+
+
+def test_extrae_nodo_y_observacion_sin_arrastrar_nan() -> None:
+    """Las celdas vacías de columnas opcionales quedan en None, no en 'nan'."""
+    frame = pd.DataFrame(
+        {
+            "id": ["A", "B"],
+            "lat": [-34.60, -34.61],
+            "lon": [-58.38, -58.39],
+            "nodo": ["ATOCHA", None],
+            "obs": [None, "  Sin acceso al poste  "],
+        }
+    )
+
+    points, _ = extract_points(frame, "id", "lat", "lon", col_node="nodo", col_obs="obs")
+
+    assert points["node"].tolist() == ["ATOCHA", None]
+    assert points["observation"].tolist() == [None, "Sin acceso al poste"]
+
+
+@pytest.mark.parametrize(
+    "marca", ["Sí", "si", "SI", "x", "X", "✓", "✔", "TRUE", True, 1, "ok", "Hecho", "realizado"]
+)
+def test_las_filas_realizadas_se_apartan(marca: object) -> None:
+    """Todas las formas razonables de tildar "Realizado" cuentan como hecha."""
+    frame = pd.DataFrame(
+        {"id": ["HECHA", "PENDIENTE"], "realizado": [marca, None]}
+    )
+
+    pending, done = split_done(frame, "realizado")
+
+    assert done == 1
+    assert pending["id"].tolist() == ["PENDIENTE"]
+
+
+@pytest.mark.parametrize("marca", ["No", "no", "", None, False, 0, "pendiente"])
+def test_no_realizado_sigue_pendiente(marca: object) -> None:
+    """Un "No", una celda vacía o texto libre no marcan la tarea como hecha."""
+    frame = pd.DataFrame({"id": ["A"], "realizado": [marca]})
+
+    pending, done = split_done(frame, "realizado")
+
+    assert done == 0
+    assert len(pending) == 1
+
+
+def test_apartar_realizadas_conserva_el_numero_de_fila() -> None:
+    """Las filas descartadas después informan su fila original en la planilla."""
+    frame = pd.DataFrame(
+        {
+            "id": ["HECHA", "MALA", "OK"],
+            "realizado": ["Sí", None, None],
+            "lat": [-34.60, None, -34.61],
+            "lon": [-58.38, None, -58.39],
+        }
+    )
+
+    pending, _ = split_done(frame, "realizado")
+    points, discarded = extract_points(pending, "id", "lat", "lon")
+
+    assert points["id"].tolist() == ["OK"]
+    assert discarded == [{"row": 2, "reason": "Coordenada vacía o no numérica"}]
+
+
+def test_sin_columna_de_realizado_no_aparta_nada() -> None:
+    """Sin columna mapeada, todas las filas siguen pendientes."""
+    frame = pd.DataFrame({"id": ["A", "B"]})
+
+    pending, done = split_done(frame, None)
+
+    assert done == 0
+    assert len(pending) == 2

@@ -323,3 +323,92 @@ def test_process_sanea_el_error_de_lectura(
     assert response.status_code == 422
     assert "zip" not in response.json()["detail"].lower()
     assert "zip" in caplog.text.lower()
+
+
+# --------------------------------------------------------------------------
+# Seguimiento: reimportar el Excel completado por los técnicos
+# --------------------------------------------------------------------------
+
+
+@pytest.fixture
+def planilla_seguimiento() -> bytes:
+    """Un Excel exportado y completado: una hecha, dos pendientes y una nueva."""
+    filas = [
+        {"ID de la cámara": "MIC-0", "Realizado": "Sí", "Observación": None,
+         "Nodo preliminar": "ATOCHA", "Latitud": -34.6037, "Longitud": -58.3816},
+        {"ID de la cámara": "MIC-1", "Realizado": "No", "Observación": "Sin acceso",
+         "Nodo preliminar": "ATOCHA", "Latitud": -34.6047, "Longitud": -58.3826},
+        {"ID de la cámara": "MIC-2", "Realizado": None, "Observación": None,
+         "Nodo preliminar": None, "Latitud": -34.6057, "Longitud": -58.3836},
+        # Tarea nueva agregada al pie por el planificador.
+        {"ID de la cámara": "NUEVA-1", "Realizado": None, "Observación": None,
+         "Nodo preliminar": "CERRO SAN BERNARDO", "Latitud": -34.6067, "Longitud": -58.3846},
+    ]
+    return a_xlsx(pd.DataFrame(filas))
+
+
+def test_upload_sugiere_columnas_de_seguimiento(
+    client: TestClient, planilla_seguimiento: bytes
+) -> None:
+    """Al volver a subir el Excel, el mapeo de seguimiento se completa solo."""
+    response = client.post(
+        "/upload-excel/",
+        files={"file": ("seguimiento.xlsx", planilla_seguimiento, XLSX_MIME)},
+    )
+
+    sugerido = response.json()["suggested_mapping"]
+    assert sugerido["id"] == "ID de la cámara"
+    assert sugerido["done"] == "Realizado"
+    assert sugerido["node"] == "Nodo preliminar"
+    assert sugerido["observation"] == "Observación"
+
+
+def test_process_aparta_las_realizadas_y_conserva_el_seguimiento(
+    client: TestClient, planilla_seguimiento: bytes
+) -> None:
+    """Las hechas no se replanifican; las pendientes traen nodo y observación."""
+    response = client.post(
+        "/process/",
+        files={"file": ("seguimiento.xlsx", planilla_seguimiento, XLSX_MIME)},
+        data={
+            "col_id": "ID de la cámara",
+            "col_lat": "Latitud",
+            "col_lon": "Longitud",
+            "col_done": "Realizado",
+            "col_node": "Nodo preliminar",
+            "col_obs": "Observación",
+            "eps_km": 2,
+        },
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["stats"]["done_rows"] == 1
+    assert body["stats"]["discarded_rows"] == 0
+    camaras = {camera["id"]: camera for camera in body["cameras"]}
+    assert set(camaras) == {"MIC-1", "MIC-2", "NUEVA-1"}
+    assert camaras["MIC-1"]["observation"] == "Sin acceso"
+    assert camaras["NUEVA-1"]["node"] == "CERRO SAN BERNARDO"
+    assert camaras["MIC-2"]["node"] is None
+
+
+def test_process_con_todo_realizado_lo_dice(
+    client: TestClient, planilla_seguimiento: bytes
+) -> None:
+    """Si no queda nada pendiente, el error lo explica en vez de hablar de coordenadas."""
+    frame = pd.read_excel(io.BytesIO(planilla_seguimiento))
+    frame["Realizado"] = "Sí"
+
+    response = client.post(
+        "/process/",
+        files={"file": ("seguimiento.xlsx", a_xlsx(frame), XLSX_MIME)},
+        data={
+            "col_id": "ID de la cámara",
+            "col_lat": "Latitud",
+            "col_lon": "Longitud",
+            "col_done": "Realizado",
+        },
+    )
+
+    assert response.status_code == 422
+    assert "realizadas" in response.json()["detail"]

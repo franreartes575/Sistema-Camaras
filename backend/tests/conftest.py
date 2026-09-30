@@ -2,7 +2,15 @@
 
 import pytest
 
+from app.export_route import export_rate_limit
 from app.main import app, _optimize_rate_limit, _process_rate_limit, _upload_rate_limit
+
+_LIMITADORES = (
+    _upload_rate_limit,
+    _process_rate_limit,
+    _optimize_rate_limit,
+    export_rate_limit,
+)
 
 
 @pytest.fixture(autouse=True)
@@ -14,10 +22,8 @@ def _sin_limite_de_tasa():
     aplicación, no el rate limiter en sí (que ya tiene su propio test en
     test_security.py, contra SlidingWindowLimiter directamente).
     """
-    app.dependency_overrides[_upload_rate_limit] = lambda: None
-    app.dependency_overrides[_process_rate_limit] = lambda: None
-    app.dependency_overrides[_optimize_rate_limit] = lambda: None
+    for limitador in _LIMITADORES:
+        app.dependency_overrides[limitador] = lambda: None
     yield
-    app.dependency_overrides.pop(_upload_rate_limit, None)
-    app.dependency_overrides.pop(_process_rate_limit, None)
-    app.dependency_overrides.pop(_optimize_rate_limit, None)
+    for limitador in _LIMITADORES:
+        app.dependency_overrides.pop(limitador, None)

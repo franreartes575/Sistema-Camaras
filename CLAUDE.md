@@ -35,6 +35,12 @@ npm run lint
 No hay tests de frontend. `npm run build` es la única verificación automática;
 corrélo siempre después de tocar `.tsx`.
 
+El panel lateral es una secuencia de pasos (`components/ui/Step.tsx`):
+`ControlPanel.tsx` sólo decide estado y plegado de cada uno; el contenido está
+en `components/panel/`. Las fechas del plan se calculan en `lib/planDates.ts`
+como texto ISO local — no pases por `Date.toISOString()`, que es UTC y corre
+el día.
+
 ### Motor de ruteo
 
 ```powershell
@@ -52,8 +58,33 @@ provincia de Salta. El flujo completo es:
 
 ```
 planilla .xlsx → encabezados + mapeo sugerido → validación de coordenadas
-              → DBSCAN (agrupa por cercanía) → un TSP por cluster → recorridos
+              → DBSCAN (agrupa por cercanía) → VRP por cluster (jornadas)
+              → fechas → Excel de seguimiento → técnicos lo completan
+              → se vuelve a subir: lo realizado se aparta, lo pendiente se replanifica
 ```
+
+### El Excel de seguimiento es también una planilla de entrada
+
+`services/export.py` (endpoint en `export_route.py`) arma el Excel que
+completan los técnicos, y ese mismo archivo vuelve a entrar por el paso 1.
+Por eso:
+
+- La primera hoja ("Recorridos") tiene los encabezados en la fila 1, sin
+  títulos arriba: `read_dataframe` lee la primera hoja y la primera fila.
+- Lleva **Latitud y Longitud** además de las columnas pedidas: sin ellas lo
+  pendiente no se podría replanificar sin la planilla original.
+- Los nombres de columna están elegidos para que `suggest_mapping` los mapee
+  solo (id, lat/lon, nodo, observación, realizado). Si cambiás un encabezado,
+  corré `test_export.py::test_ida_y_vuelta…`.
+- `split_done` aparta las filas tildadas en "Realizado" (Sí, x, ✓, 1…) antes
+  de validar coordenadas, conservando el número de fila original.
+- openpyxl escribe como **fórmula** todo texto que empieza con `=`: los textos
+  que vienen del usuario (ID, observación, nodo) pasan por `_set_text`.
+- El rate limiter de `/export/` vive en su router: si agregás otro, sumalo a
+  `_LIMITADORES` en `tests/conftest.py`.
+
+La jornada con menos cámaras queda siempre última (`_lightest_day_last` en
+`vrp.py`): es la que tiene lugar para sumarle lo que quede pendiente.
 
 ### El backend no guarda estado
 

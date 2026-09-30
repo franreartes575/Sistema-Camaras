@@ -13,9 +13,17 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import "maplibre-gl/dist/maplibre-gl.css";
 
 import type { Camera, Cluster, ClusterRoute, ClusterStart, Depot } from "@/lib/api";
+import { formatDayLabel } from "@/lib/format";
 import { circlePolygon } from "@/lib/geo";
+import { routeKey } from "@/lib/planDates";
 import { OSM_STYLE } from "@/lib/mapStyle";
-import { DAY_COLOR_EXPRESSION, DEPOT_INK, MARK_RING, NOISE_INK } from "@/lib/vizTokens";
+import {
+  DAY_COLOR_EXPRESSION,
+  DAY_PALETTE,
+  DEPOT_INK,
+  MARK_RING,
+  NOISE_INK,
+} from "@/lib/vizTokens";
 
 /** Punto de partida asignado a un cluster, tal como se va a mandar al backend. */
 export type StartPoint = ClusterStart & { cluster: number };
@@ -26,6 +34,8 @@ type Props = {
   clusters: Cluster[];
   depots: Depot[];
   starts: StartPoint[];
+  /** Fecha planificada por recorrido (clave `routeKey`), para el rótulo. */
+  routeDates?: Record<string, string>;
   selectedCluster: number | null;
   /** Jornada resaltada dentro de `selectedCluster`; null = todas sus jornadas. */
   selectedDay: number | null;
@@ -63,6 +73,7 @@ export default function MapView({
   clusters,
   depots,
   starts,
+  routeDates = {},
   selectedCluster,
   selectedDay,
   onSelectCluster,
@@ -163,17 +174,24 @@ export default function MapView({
           properties: {
             cluster: route.cluster_id,
             day: route.vehicle_day,
-            label: `Día ${route.vehicle_day}`,
+            label: routeDates[routeKey(route)]
+              ? `Día ${route.vehicle_day} · ${formatDayLabel(routeDates[routeKey(route)])}`
+              : `Día ${route.vehicle_day}`,
           },
         })),
     }),
-    [routes],
+    [routes, routeDates],
   );
+
+  // Último encuadre pedido. En el celular el mapa puede estar oculto (tamaño
+  // cero) cuando se elige un día: al mostrarse hay que volver a encuadrar.
+  const lastFitRef = useRef<{ subset: LatLon[]; maxZoom: number } | null>(null);
 
   /** Encuadra el mapa sobre el conjunto de puntos que se le pase. */
   const fitTo = useCallback((subset: LatLon[], maxZoom: number) => {
     const map = mapRef.current;
     if (!map || subset.length === 0) return;
+    lastFitRef.current = { subset, maxZoom };
 
     const lats = subset.map((point) => point.lat);
     const lons = subset.map((point) => point.lon);
@@ -286,10 +304,37 @@ export default function MapView({
       onClick={handleClick}
       onMouseMove={handleHover}
       onMouseOut={() => setHover(null)}
+      onResize={() => {
+        const last = lastFitRef.current;
+        if (last) fitTo(last.subset, last.maxZoom);
+      }}
       cursor={hover ? "pointer" : "grab"}
     >
       <NavigationControl position="top-right" />
       <ScaleControl position="bottom-left" />
+
+      {cameras.length > 0 && (
+        <div className="pointer-events-none absolute left-2 top-2 z-10 flex flex-wrap items-center gap-x-3 gap-y-1 rounded-lg bg-slate-950/85 px-2.5 py-1.5 text-[11px] text-slate-200 shadow-lg ring-1 ring-white/10 backdrop-blur">
+          {routes.length > 0 && (
+            <span className="flex items-center gap-1">
+              <span className="flex">
+                {DAY_PALETTE.map((color) => (
+                  <span key={color} className="h-2.5 w-2 first:rounded-l-full last:rounded-r-full" style={{ backgroundColor: color }} />
+                ))}
+              </span>
+              Un color por día
+            </span>
+          )}
+          <span className="flex items-center gap-1">
+            <span className="h-2.5 w-2.5 rounded-full ring-1 ring-white" style={{ backgroundColor: NOISE_INK }} />
+            Sin recorrido
+          </span>
+          <span className="flex items-center gap-1">
+            <span className="h-2.5 w-2.5 rounded-full bg-white ring-2" style={{ ["--tw-ring-color" as string]: DEPOT_INK }} />
+            Salida
+          </span>
+        </div>
+      )}
 
       {clusters.length > 0 && (
         <Source id="limites-cluster" type="geojson" data={boundaries}>

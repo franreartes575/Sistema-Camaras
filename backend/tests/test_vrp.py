@@ -1,5 +1,7 @@
 """Tests del ruteo con presupuesto de jornada y punto de partida externo."""
 
+import pytest
+
 from app.services.routing import HaversineProvider
 from app.services.vrp import build_day_routes
 
@@ -245,6 +247,24 @@ def test_minimo_por_dia_deja_a_lo_sumo_un_dia_corto() -> None:
     assert len(cortos) <= 1
     visitadas = sorted(stop.index for route in plan.routes for stop in route.stops)
     assert visitadas == list(range(1, 13))
+
+
+@pytest.mark.parametrize("minimo", [None, 5], ids=["sin minimo", "minimo 5"])
+def test_el_dia_con_menos_camaras_queda_ultimo(minimo: int | None) -> None:
+    """El día más liviano va al final: ahí se suman los pendientes de los demás."""
+    plan = build_day_routes(
+        [DEPOT, *GRID],
+        HaversineProvider(average_speed_kmh=40),
+        day_budget_s=DAY_BUDGET_8H,
+        service_time_s=SERVICE_10MIN,
+        time_limit_s=2,
+        max_stops_per_day=5,
+        min_stops_per_day=minimo,
+    )
+
+    cantidades = [len(route.stops) for route in plan.routes]
+    assert len(cantidades) == 3
+    assert cantidades[-1] == min(cantidades)
 
 
 def test_minimo_imposible_deja_camaras_fuera_por_regla_no_por_distancia() -> None:

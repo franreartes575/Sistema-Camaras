@@ -13,6 +13,11 @@ export type SuggestedMapping = {
   lon: string | null;
   coords: string | null;
   label: string | null;
+  /** Nodo preliminar ("Nodo a Migrar" en cnMaestro). */
+  node: string | null;
+  observation: string | null;
+  /** Columna "Realizado" de un Excel de seguimiento ya completado. */
+  done: string | null;
   mode: CoordMode;
 };
 
@@ -28,6 +33,10 @@ export type Camera = {
   lat: number;
   lon: number;
   label: string | null;
+  /** Nodo preliminar al que se migra. */
+  node: string | null;
+  /** Observación arrastrada de un seguimiento anterior. */
+  observation: string | null;
   cluster: number;
   /** True si era ruido DBSCAN y se reasignó a un cluster cercano. */
   reassigned: boolean;
@@ -47,6 +56,8 @@ export type IngestStats = {
   total_rows: number;
   valid_rows: number;
   discarded_rows: number;
+  /** Filas tildadas como realizadas en un seguimiento: no se replanifican. */
+  done_rows: number;
   cluster_count: number;
   noise_count: number;
   eps_km: number;
@@ -121,6 +132,10 @@ export type ColumnMapping = {
   col_coords: string;
   coord_order: CoordOrder;
   col_label?: string;
+  /** Columnas de seguimiento opcionales; "" = no se usa. */
+  col_node?: string;
+  col_obs?: string;
+  col_done?: string;
 };
 
 export type ClusterParams = {
@@ -179,6 +194,9 @@ function mappingFields(file: File, mapping: ColumnMapping, params: ClusterParams
     body.append("col_lon", mapping.col_lon);
   }
   if (mapping.col_label) body.append("col_label", mapping.col_label);
+  if (mapping.col_node) body.append("col_node", mapping.col_node);
+  if (mapping.col_obs) body.append("col_obs", mapping.col_obs);
+  if (mapping.col_done) body.append("col_done", mapping.col_done);
   body.append("eps_km", String(params.eps_km));
   body.append("min_samples", String(params.min_samples));
   body.append("noise_reassign_factor", String(params.noise_reassign_factor));
@@ -223,4 +241,53 @@ export function optimize(
   body.append("max_stops_per_day", String(routing.max_stops_per_day));
   body.append("min_stops_per_day", String(routing.min_stops_per_day));
   return post<OptimizeResponse>("/optimize/", body);
+}
+
+export type ExportStop = {
+  camera_id: string;
+  lat: number;
+  lon: number;
+  node: string | null;
+  observation: string | null;
+};
+
+/** Un recorrido con la fecha en que se va a hacer ("AAAA-MM-DD"). */
+export type ExportDay = {
+  date: string;
+  cluster_id: number;
+  day: number;
+  start_name: string | null;
+  distance_m: number;
+  duration_s: number;
+  stops: ExportStop[];
+};
+
+/** Nombre sugerido por el backend en Content-Disposition, si vino. */
+function filenameFrom(response: Response, fallback: string): string {
+  const header = response.headers.get("Content-Disposition") ?? "";
+  return /filename="([^"]+)"/.exec(header)?.[1] ?? fallback;
+}
+
+/**
+ * Pide el Excel de seguimiento del plan. Devuelve el archivo y el nombre con
+ * que conviene guardarlo; la descarga en sí la dispara quien llama.
+ */
+export async function exportPlan(
+  days: ExportDay[],
+): Promise<{ blob: Blob; filename: string }> {
+  const response = await fetch(`${API_BASE_URL}/export/`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ days }),
+  });
+
+  if (!response.ok) {
+    const payload = await response.json().catch(() => null);
+    const detail = payload?.detail;
+    throw new Error(
+      typeof detail === "string" ? detail : `No se pudo exportar (error ${response.status})`,
+    );
+  }
+
+  return { blob: await response.blob(), filename: filenameFrom(response, "plan-recorridos.xlsx") };
 }

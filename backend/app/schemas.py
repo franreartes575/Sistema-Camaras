@@ -1,5 +1,7 @@
 """Modelos de respuesta de la API."""
 
+import datetime as dt
+
 from pydantic import BaseModel, Field
 
 
@@ -13,6 +15,11 @@ class SuggestedMapping(BaseModel):
         None, description="Columna única con latitud y longitud juntas"
     )
     label: str | None = Field(None, description="Columna descriptiva / dirección")
+    node: str | None = Field(None, description="Columna del nodo preliminar")
+    observation: str | None = Field(None, description="Columna de observaciones")
+    done: str | None = Field(
+        None, description="Columna 'Realizado' del Excel de seguimiento"
+    )
     mode: str = Field(
         "split", description="'split' (dos columnas) o 'single' (columna combinada)"
     )
@@ -36,6 +43,10 @@ class Camera(BaseModel):
     lat: float
     lon: float
     label: str | None = None
+    node: str | None = Field(None, description="Nodo preliminar al que se migra")
+    observation: str | None = Field(
+        None, description="Observación arrastrada de un seguimiento anterior"
+    )
     cluster: int = Field(
         ..., description="Id de cluster DBSCAN; -1 indica punto de ruido"
     )
@@ -70,6 +81,9 @@ class IngestStats(BaseModel):
     total_rows: int
     valid_rows: int
     discarded_rows: int
+    done_rows: int = Field(
+        0, description="Filas marcadas como realizadas: no se replanifican"
+    )
     cluster_count: int
     noise_count: int = Field(
         ...,
@@ -164,3 +178,45 @@ class OptimizeResponse(BaseModel):
     clusters: list[Cluster]
     routes: list[ClusterRoute]
     discarded: list[DiscardedRow]
+
+
+# --------------------------------------------------------------------------
+# Exportación del plan a Excel (POST /export/)
+# --------------------------------------------------------------------------
+
+# Topes de tamaño: el endpoint arma el archivo en memoria.
+MAX_EXPORT_DAYS = 366
+MAX_STOPS_PER_EXPORT_DAY = 500
+
+
+class ExportStop(BaseModel):
+    """Una cámara del plan, tal como va al Excel de seguimiento."""
+
+    camera_id: str = Field(..., min_length=1, max_length=200)
+    lat: float = Field(..., ge=-90, le=90)
+    lon: float = Field(..., ge=-180, le=180)
+    node: str | None = Field(None, max_length=200, description="Nodo preliminar")
+    observation: str | None = Field(
+        None, max_length=2000, description="Observación de un seguimiento anterior"
+    )
+
+
+class ExportDay(BaseModel):
+    """Un recorrido (jornada) con la fecha en que se va a hacer."""
+
+    date: dt.date
+    cluster_id: int
+    day: int = Field(..., ge=1, description="Número de jornada dentro del cluster")
+    start_name: str | None = Field(None, max_length=200)
+    distance_m: float = Field(..., ge=0)
+    duration_s: float = Field(..., ge=0)
+    stops: list[ExportStop] = Field(
+        ..., min_length=1, max_length=MAX_STOPS_PER_EXPORT_DAY,
+        description="Cámaras en orden de visita",
+    )
+
+
+class ExportRequest(BaseModel):
+    """Plan completo a exportar: el backend no guarda estado, llega entero."""
+
+    days: list[ExportDay] = Field(..., min_length=1, max_length=MAX_EXPORT_DAYS)

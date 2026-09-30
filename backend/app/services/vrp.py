@@ -287,6 +287,21 @@ def _build_route(
     )
 
 
+def _lightest_day_last(routes: list[DayRoute]) -> list[DayRoute]:
+    """Mueve al final la jornada con menos cámaras (a igualdad, la más corta).
+
+    Es la que tiene margen para absorber lo que quede pendiente de los días
+    anteriores. El resto conserva el orden del solver.
+    """
+    if len(routes) < 2:
+        return routes
+    lightest = min(
+        range(len(routes)),
+        key=lambda i: (len(routes[i].stops), routes[i].total_duration_s),
+    )
+    return [route for i, route in enumerate(routes) if i != lightest] + [routes[lightest]]
+
+
 def _solve_plan(
     points: list[Point],
     distances_m: np.ndarray,
@@ -325,6 +340,7 @@ def _solve_plan(
         oriented = _farthest_first(nodes, durations_s, service_time_s, day_budget_s)
         routes.append(_build_route(oriented, distances_m, durations_s, service_time_s))
 
+    routes = _lightest_day_last(routes)
     visited = {stop.index for route in routes for stop in route.stops}
     unserved = tuple(node for node in range(1, len(points)) if node not in visited)
     out_of_reach = tuple(

@@ -36,6 +36,16 @@ _COORDS_PATTERNS = (
     r"geo",
     r"punto",
 )
+# Columnas de seguimiento. "Nodo al cual se migró" es el nodo real, que carga
+# el técnico; el preliminar es el planificado ("Nodo a Migrar" en cnMaestro).
+_NODE_PATTERNS = (r"nodo\s*pre", r"nodo\s*a\s*migrar", r"^nodo(?!.*se\s+migr)")
+_OBS_PATTERNS = (r"observ", r"coment")
+_DONE_PATTERNS = (r"realizad", r"^hecho", r"^completad")
+# Formas de tildar "Realizado" que cuentan como tarea hecha.
+_DONE_MARKS = frozenset(
+    {"si", "sí", "s", "x", "✓", "✔", "☑", "true", "verdadero", "1", "ok",
+     "hecho", "hecha", "realizado", "realizada", "yes", "y"}
+)
 # Hasta 1e9 cubre microgrados (1e6) y las exportaciones con más precisión.
 _MAX_COORD_SCALE_EXPONENT = 9
 
@@ -97,8 +107,48 @@ def suggest_mapping(columns: list[str]) -> dict[str, str | None]:
         "lon": lon,
         "coords": coords,
         "label": _match(columns, _LABEL_PATTERNS),
+        "node": _match(columns, _NODE_PATTERNS),
+        "observation": _match(columns, _OBS_PATTERNS),
+        "done": _match(columns, _DONE_PATTERNS),
         "mode": mode,
     }
+
+
+def _is_done(value: object) -> bool:
+    """True si la celda de "Realizado" marca la tarea como hecha."""
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return value == 1  # NaN != 1: una celda vacía no está hecha
+    if not isinstance(value, str):
+        return False
+    return value.strip().lower() in _DONE_MARKS
+
+
+def split_done(frame: pd.DataFrame, col_done: str | None) -> tuple[pd.DataFrame, int]:
+    """Aparta las filas marcadas como realizadas; devuelve las pendientes y cuántas se apartaron.
+
+    Conserva el índice original, así las filas que después se descarten por
+    coordenadas siguen informando su número de fila real en la planilla.
+    """
+    if not col_done:
+        return frame, 0
+    if col_done not in frame.columns:
+        raise ValueError(f"Columnas inexistentes en la planilla: {col_done}")
+    done = frame[col_done].map(_is_done).astype(bool)
+    return frame.loc[~done], int(done.sum())
+
+
+def _optional_text(frame: pd.DataFrame, column: str | None) -> list[str | None]:
+    """Texto limpio de una columna opcional; vacíos y NaN quedan en None."""
+    if not column:
+        return [None] * len(frame)
+    values: list[str | None] = []
+    for value in frame[column]:
+        # pandas 3 conserva NaN como float en columnas de texto: no basta astype(str).
+        text = "" if value is None or (isinstance(value, float) and pd.isna(value)) else str(value).strip()
+        values.append(text or None)
+    return values
 
 
 def _to_float_series(series: pd.Series) -> pd.Series:
@@ -246,14 +296,17 @@ def extract_points(
     col_label: str | None = None,
     col_coords: str | None = None,
     coord_order: str = "auto",
+    col_node: str | None = None,
+    col_obs: str | None = None,
 ) -> tuple[pd.DataFrame, list[dict[str, object]]]:
     """Normaliza y valida las filas geográficas.
 
     Acepta las coordenadas en dos columnas separadas (`col_lat`/`col_lon`) o en
     una sola columna combinada (`col_coords`).
 
-    Devuelve el DataFrame de puntos válidos (columnas id/lat/lon/label) y la
-    lista de filas descartadas con su motivo.
+    Devuelve el DataFrame de puntos válidos (columnas id/lat/lon/label/node/
+    observation) y la lista de filas descartadas con su motivo. El número de
+    fila sale del índice del DataFrame, así sobrevive a un `split_done` previo.
     """
     single = bool(col_coords)
     if not single and not (col_lat and col_lon):
@@ -270,8 +323,7 @@ def extract_points(
         )
 
     needed = [col_id, col_coords] if single else [col_id, col_lat, col_lon]
-    if col_label:
-        needed.append(col_label)
+    needed += [column for column in (col_label, col_node, col_obs) if column]
 
     missing = [name for name in needed if name and name not in frame.columns]
     if missing:
@@ -286,13 +338,16 @@ def extract_points(
 
     work = pd.DataFrame(
         {
-            "row": range(1, len(frame) + 1),
-            "id": frame[col_id].astype(str).str.strip(),
+            "row": (frame.index + 1).to_numpy(),
+            "id": frame[col_id].astype(str).str.strip().to_numpy(),
             "lat": lat_series.to_numpy(),
             "lon": lon_series.to_numpy(),
+            # dtype object: con el dtype `str` de pandas 3 los None vuelven como NaN.
+            "label": pd.Series(_optional_text(frame, col_label), dtype=object),
+            "node": pd.Series(_optional_text(frame, col_node), dtype=object),
+            "observation": pd.Series(_optional_text(frame, col_obs), dtype=object),
         }
     )
-    work["label"] = frame[col_label].astype(str).str.strip() if col_label else None
 
     discarded: list[dict[str, object]] = []
 

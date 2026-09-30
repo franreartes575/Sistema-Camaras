@@ -27,6 +27,7 @@ from .config import (
     RATE_LIMIT_UPLOAD_MAX,
     UPLOAD_CHUNK_BYTES,
 )
+from .export_route import router as export_router
 from .security import rate_limiter, require_api_key
 from .schemas import (
     Camera,
@@ -50,6 +51,7 @@ from .services.ingest import (
     extract_points,
     read_dataframe,
     read_headers,
+    split_done,
     suggest_mapping,
 )
 from .services.routing import (
@@ -105,7 +107,11 @@ app.add_middleware(
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
+    # El frontend lee el nombre sugerido del Excel exportado.
+    expose_headers=["Content-Disposition"],
 )
+
+app.include_router(export_router)
 
 
 @app.get("/health")
@@ -220,19 +226,29 @@ def _mapping_warning(
     return None
 
 
+class ColumnMap(NamedTuple):
+    """Qué columna de la planilla cumple cada rol (vacío = no se usa)."""
+
+    col_id: str
+    col_lat: str | None
+    col_lon: str | None
+    col_coords: str | None
+    coord_order: str
+    col_label: str | None
+    col_node: str | None = None
+    col_obs: str | None = None
+    col_done: str | None = None
+
+
 async def _ingest_and_cluster(
     file: UploadFile,
-    col_id: str,
-    col_lat: str | None,
-    col_lon: str | None,
-    col_coords: str | None,
-    coord_order: str,
-    col_label: str | None,
+    columns: ColumnMap,
     eps_km: float,
     min_samples: int,
     noise_reassign_factor: float,
 ) -> Clustered:
-    """Lee la planilla, valida las coordenadas y agrupa con DBSCAN."""
+    """Lee la planilla, aparta lo realizado, valida coordenadas y agrupa con DBSCAN."""
+    col_lat, col_lon, col_coords = columns.col_lat, columns.col_lon, columns.col_coords
     filename, raw = await _read_upload(file)
 
     try:
@@ -252,14 +268,27 @@ async def _ingest_and_cluster(
         raise HTTPException(status_code=422, detail="La planilla no tiene filas.")
 
     try:
+        # Un Excel de seguimiento ya completado: lo tildado como realizado no
+        # se vuelve a planificar.
+        frame, done_rows = split_done(frame, columns.col_done or None)
+        if frame.empty:
+            raise HTTPException(
+                status_code=422,
+                detail=(
+                    f"Las {done_rows} filas están marcadas como realizadas: no "
+                    f"queda nada pendiente para planificar."
+                ),
+            )
         points, discarded = extract_points(
             frame,
-            col_id,
+            columns.col_id,
             col_lat=col_lat or None,
             col_lon=col_lon or None,
-            col_label=col_label or None,
+            col_label=columns.col_label or None,
             col_coords=col_coords or None,
-            coord_order=coord_order,
+            coord_order=columns.coord_order,
+            col_node=columns.col_node or None,
+            col_obs=columns.col_obs or None,
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -273,7 +302,7 @@ async def _ingest_and_cluster(
         raise HTTPException(
             status_code=422,
             detail=(
-                f"Ninguna de las {total_rows} filas dio coordenadas válidas "
+                f"Ninguna de las {len(frame)} filas dio coordenadas válidas "
                 f"leyendo {usadas}. Verifique que el mapeo de columnas sea el "
                 f"correcto y que esa columna contenga números."
             ),
@@ -285,7 +314,7 @@ async def _ingest_and_cluster(
         if col_coords
         else f"las columnas '{col_lat}' y '{col_lon}'"
     )
-    warning = _mapping_warning(span_km, len(points), total_rows, origen)
+    warning = _mapping_warning(span_km, len(points), len(frame), origen)
 
     labels, clusters = run_dbscan(points, eps_km=eps_km, min_samples=min_samples)
     original_labels = labels
@@ -297,7 +326,9 @@ async def _ingest_and_cluster(
             id=str(record["id"]),
             lat=float(record["lat"]),
             lon=float(record["lon"]),
-            label=record["label"] if record["label"] else None,
+            label=record["label"],
+            node=record["node"],
+            observation=record["observation"],
             cluster=int(label),
             reassigned=bool(original_label == -1 and label != -1),
         )
@@ -322,6 +353,7 @@ async def _ingest_and_cluster(
             total_rows=total_rows,
             valid_rows=len(cameras),
             discarded_rows=len(discarded),
+            done_rows=done_rows,
             cluster_count=len(clusters),
             noise_count=sin_rutear,
             eps_km=eps_km,
@@ -348,6 +380,9 @@ async def process(
     col_coords: str | None = Form(None),
     coord_order: str = Form("auto", pattern="^(auto|latlon|lonlat)$"),
     col_label: str | None = Form(None),
+    col_node: str | None = Form(None),
+    col_obs: str | None = Form(None),
+    col_done: str | None = Form(None),
     eps_km: float = Form(1.0, gt=0, le=500),
     min_samples: int = Form(2, ge=1, le=1000),
     noise_reassign_factor: float = Form(3.0, ge=0, le=20),
@@ -360,18 +395,15 @@ async def process(
 
     El archivo se reenvía junto con el mapeo en lugar de guardarse entre
     llamadas: mantiene el backend sin estado y evita limpiar temporales.
+    Con `col_done` (Excel de seguimiento), las filas tildadas como realizadas
+    se apartan y sólo se agrupa lo pendiente.
     """
+    columns = ColumnMap(
+        col_id, col_lat, col_lon, col_coords, coord_order, col_label,
+        col_node, col_obs, col_done,
+    )
     result = await _ingest_and_cluster(
-        file,
-        col_id,
-        col_lat,
-        col_lon,
-        col_coords,
-        coord_order,
-        col_label,
-        eps_km,
-        min_samples,
-        noise_reassign_factor,
+        file, columns, eps_km, min_samples, noise_reassign_factor
     )
 
     return ProcessResponse(
@@ -663,6 +695,9 @@ async def optimize(
     col_coords: str | None = Form(None),
     coord_order: str = Form("auto", pattern="^(auto|latlon|lonlat)$"),
     col_label: str | None = Form(None),
+    col_node: str | None = Form(None),
+    col_obs: str | None = Form(None),
+    col_done: str | None = Form(None),
     eps_km: float = Form(1.0, gt=0, le=500),
     min_samples: int = Form(2, ge=1, le=1000),
     noise_reassign_factor: float = Form(3.0, ge=0, le=20),
@@ -698,17 +733,12 @@ async def optimize(
             ),
         )
 
+    columns = ColumnMap(
+        col_id, col_lat, col_lon, col_coords, coord_order, col_label,
+        col_node, col_obs, col_done,
+    )
     result = await _ingest_and_cluster(
-        file,
-        col_id,
-        col_lat,
-        col_lon,
-        col_coords,
-        coord_order,
-        col_label,
-        eps_km,
-        min_samples,
-        noise_reassign_factor,
+        file, columns, eps_km, min_samples, noise_reassign_factor
     )
 
     cluster_starts = _parse_cluster_starts(cluster_starts_json)
