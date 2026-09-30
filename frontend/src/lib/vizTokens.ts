@@ -5,8 +5,8 @@
  * codifica con matiz: una paleta categorica solo sostiene 3 colores simultaneos
  * sobre el fondo de los tiles OSM antes de que pares como naranja/amarillo caigan
  * por debajo del piso de distinguibilidad. En su lugar la identidad la lleva el
- * numero impreso sobre cada punto, y el color codifica un unico estado binario:
- * seleccionado vs. no seleccionado. Eso escala a cualquier cantidad de clusters.
+ * numero impreso sobre cada punto. Lo que sí lleva color es la jornada (día) de
+ * cada recorrido — ver DAY_PALETTE y sus límites.
  */
 
 /** Fondo aproximado de los tiles raster de OpenStreetMap. */
@@ -31,3 +31,34 @@ export const MARK_RING = "#ffffff";
  * categoría nueva ("acá sale un vehículo").
  */
 export const DEPOT_INK = "#1fb17a";
+
+/**
+ * Color de cada jornada (día) de recorrido.
+ *
+ * Validada con el script de la skill dataviz contra TILE_SURFACE comparando
+ * TODOS los pares (con varios días a la vista cualquier par puede quedar
+ * junto): es el conjunto más grande que pasa. Sumar rosa u otro naranja rompe
+ * el piso de visión normal; verde/rojo queda en la banda 6–8 para daltonismo,
+ * legal sólo con codificación secundaria — que existe: cada línea lleva
+ * "Día N" y cada parada "día·orden". Por la misma razón, con más de cinco
+ * días el color se repite: la identidad la sigue llevando el rótulo, y al
+ * seleccionar un día se dibuja solo, sin nada con qué confundirlo.
+ */
+export const DAY_PALETTE = ["#2a78d6", "#eda100", "#4a3aa7", "#e34948", "#008300"] as const;
+
+/** Color de la jornada `day` (base 1). */
+export function dayColor(day: number): string {
+  return DAY_PALETTE[(day - 1) % DAY_PALETTE.length];
+}
+
+/**
+ * Expresión MapLibre equivalente a `dayColor`, leyendo la propiedad `day`.
+ * Es un `match` y no un `at` sobre un literal: MapLibre tipa ese literal como
+ * array<string> y rechaza la capa por no ser array<color>.
+ */
+export const DAY_COLOR_EXPRESSION = [
+  "match",
+  ["%", ["-", ["get", "day"], 1], DAY_PALETTE.length],
+  ...DAY_PALETTE.slice(0, -1).flatMap((color, index) => [index, color]),
+  DAY_PALETTE[DAY_PALETTE.length - 1],
+];

@@ -123,16 +123,26 @@ Si OSRM no puede unir dos paradas por calle, `distance_from_previous_m` es
 haría parecer que las paradas son contiguas cuando el recorrido no es
 transitable.
 
-### El color del mapa no identifica clusters
+### El color del mapa identifica días, no clusters
 
-La cantidad de clusters no está acotada, y una paleta categórica sólo sostiene
-**tres** colores simultáneos sobre el fondo de los tiles OSM antes de caer por
-debajo del piso de distinguibilidad. Por eso la identidad la lleva el número
-impreso sobre cada punto, y el color codifica un estado binario: seleccionado
-vs. en reposo. Si vas a tocar `lib/vizTokens.ts`, tené presente ese límite.
+La cantidad de clusters no está acotada, así que el color nunca identifica un
+cluster. Sí identifica la **jornada** (día) de cada recorrido, con
+`DAY_PALETTE` en `lib/vizTokens.ts`: cinco colores validados contra el fondo
+de los tiles OSM comparando todos los pares. Es el máximo que pasa — sumar un
+sexto rompe el piso de distinguibilidad. Con más de cinco días el color se
+repite, por eso la identidad la sigue llevando el rótulo ("Día N" en la línea,
+"día·orden" en cada parada), y al elegir un día se dibuja solo (las demás
+capas se filtran, no se atenúan).
 
-Ojo también con las expresiones de MapLibre: `["case", valor]` es **inválido**
-—`case` exige condición, resultado y fallback— y rechaza la capa entera.
+Ojo con las expresiones de MapLibre, que rechazan la capa entera en silencio
+para el usuario (sólo queda un error en consola):
+
+- `["case", valor]` es **inválido**: `case` exige condición, resultado y
+  fallback.
+- `filter={undefined}` es **inválido**: react-map-gl lo pasa tal cual. Para
+  "sin filtro" usá una expresión que siempre dé verdadero (`["has", "cluster"]`).
+- `["at", i, ["literal", [colores]]]` como color es **inválido**: el literal se
+  tipa como `array<string>`. Usá `match` sobre el índice.
 
 ### Avisos de plausibilidad
 

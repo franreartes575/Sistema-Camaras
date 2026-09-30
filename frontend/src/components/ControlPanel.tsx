@@ -14,7 +14,7 @@ import type {
   UploadExcelResponse,
 } from "@/lib/api";
 import DepotEditor from "@/components/DepotEditor";
-import { DEPOT_INK, NOISE_INK, SERIES_BASE, SERIES_SELECTED } from "@/lib/vizTokens";
+import { DEPOT_INK, NOISE_INK, dayColor } from "@/lib/vizTokens";
 
 type Props = {
   upload: UploadExcelResponse | null;
@@ -585,11 +585,10 @@ export default function ControlPanel({
           </p>
 
           <div className="flex flex-wrap gap-x-4 gap-y-1 text-xs text-slate-400">
+            <span>Cada color es un día (ver lista).</span>
             {(
               [
-                [SERIES_SELECTED, "Seleccionado"],
-                [SERIES_BASE, "En cluster"],
-                [NOISE_INK, "Ruido"],
+                [NOISE_INK, "Sin recorrido"],
                 [DEPOT_INK, "Salida"],
               ] as const
             ).map(([color, label]) => (
@@ -602,6 +601,16 @@ export default function ControlPanel({
               </span>
             ))}
           </div>
+
+          {selectedCluster !== null && (
+            <button
+              type="button"
+              onClick={() => onSelectRoute(null, null)}
+              className="w-full rounded-md border border-slate-700 px-3 py-1.5 text-xs text-slate-300 hover:border-sky-500 hover:text-sky-300"
+            >
+              Ver todos los días
+            </button>
+          )}
 
           <ul className="max-h-72 space-y-1 overflow-y-auto">
             {result.routes.map((route) => {
@@ -619,11 +628,15 @@ export default function ControlPanel({
                     }
                     className={`w-full rounded-md px-3 py-1.5 text-left text-sm transition ${
                       active
-                        ? "bg-orange-500/20 text-orange-200 ring-1 ring-orange-500/50"
+                        ? "bg-slate-800 text-slate-100 ring-1 ring-slate-400"
                         : "bg-slate-900 text-slate-300 hover:bg-slate-800"
                     }`}
                   >
                     <span className="block">
+                      <span
+                        className="mr-2 inline-block h-2.5 w-2.5 rounded-full ring-1 ring-white"
+                        style={{ backgroundColor: dayColor(route.vehicle_day) }}
+                      />
                       <span className="font-medium">
                         Día {route.vehicle_day}
                         <span className="font-normal text-slate-500">

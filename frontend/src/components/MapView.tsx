@@ -15,13 +15,7 @@ import "maplibre-gl/dist/maplibre-gl.css";
 import type { Camera, Cluster, ClusterRoute, ClusterStart, Depot } from "@/lib/api";
 import { circlePolygon } from "@/lib/geo";
 import { OSM_STYLE } from "@/lib/mapStyle";
-import {
-  DEPOT_INK,
-  MARK_RING,
-  NOISE_INK,
-  SERIES_BASE,
-  SERIES_SELECTED,
-} from "@/lib/vizTokens";
+import { DAY_COLOR_EXPRESSION, DEPOT_INK, MARK_RING, NOISE_INK } from "@/lib/vizTokens";
 
 /** Punto de partida asignado a un cluster, tal como se va a mandar al backend. */
 export type StartPoint = ClusterStart & { cluster: number };
@@ -53,9 +47,15 @@ type LatLon = { lat: number; lon: number };
 
 const POINTS_LAYER = "camaras-punto";
 
-// Opacidad de los recorridos no seleccionados mientras hay una jornada
-// resaltada: siguen visibles como contexto pero no compiten con ella.
-const DIMMED_OPACITY = 0.3;
+// Cámaras con recorrido: color de su día. Ruido o sin recorrido (no entraron
+// en ninguna jornada): tinta neutra, para que no se confundan con un día.
+const CAMERA_COLOR = ["case", [">=", ["get", "day"], 1], DAY_COLOR_EXPRESSION, NOISE_INK];
+
+// Texto sobre el mapa: tinta de texto, nunca el color de la serie.
+const LABEL_INK = "#0b0b0b";
+
+// Filtro que deja pasar todo: todas las capas filtrables tienen `cluster`.
+const MATCH_ALL = ["has", "cluster"];
 
 export default function MapView({
   cameras,
@@ -260,42 +260,21 @@ export default function MapView({
     [selectedCluster],
   );
 
-  /** Ídem, pero restringida a la jornada seleccionada si hay una. */
-  const selectionMatch = useMemo(() => {
-    if (clusterMatch === null || selectedDay === null) return clusterMatch;
+  /**
+   * Filtro de lo que se dibuja: con una jornada elegida, sólo ella; con un
+   * cluster elegido, sólo sus jornadas; sin selección, todo. "Todo" es
+   * MATCH_ALL y no `undefined`: react-map-gl pasa el prop tal cual y MapLibre
+   * rechaza la capa entera si `filter` no es un array.
+   */
+  const selectionFilter = useMemo(() => {
+    if (clusterMatch === null) return MATCH_ALL;
+    if (selectedDay === null) return clusterMatch;
     return ["all", clusterMatch, ["==", ["get", "day"], selectedDay]];
   }, [clusterMatch, selectedDay]);
 
-  // Un `case` necesita condicion, resultado y fallback — ["case", color] es
-  // invalido y MapLibre rechaza la capa entera, dejando todo sin dibujar. Por
-  // eso, sin selección, cada propiedad va con un valor liso.
-  const fillColor = useMemo(() => {
-    const noiseCase = [["==", ["get", "cluster"], -1], NOISE_INK];
-    const selectedCase = selectionMatch === null ? [] : [selectionMatch, SERIES_SELECTED];
-    return ["case", ...noiseCase, ...selectedCase, SERIES_BASE];
-  }, [selectionMatch]);
-
-  const lineColor = useMemo(
-    () =>
-      selectionMatch === null
-        ? SERIES_BASE
-        : ["case", selectionMatch, SERIES_SELECTED, SERIES_BASE],
-    [selectionMatch],
-  );
-
-  const lineOpacity = useMemo(
-    () =>
-      selectionMatch === null ? 0.9 : ["case", selectionMatch, 0.95, DIMMED_OPACITY],
-    [selectionMatch],
-  );
-
-  // El límite del cluster se resalta por cluster, nunca por jornada: el
-  // círculo no tiene propiedad `day`.
-  const boundaryColor = useMemo(
-    () =>
-      clusterMatch === null ? SERIES_BASE : ["case", clusterMatch, SERIES_SELECTED, SERIES_BASE],
-    [clusterMatch],
-  );
+  // El límite del cluster y su salida se filtran por cluster, nunca por
+  // jornada: no tienen propiedad `day`.
+  const boundaryFilter = clusterMatch ?? MATCH_ALL;
 
   return (
     <MapLibreMap
@@ -317,21 +296,16 @@ export default function MapView({
           <Layer
             id="limites-cluster-relleno"
             type="fill"
-            paint={{
-              // eslint-disable-next-line @typescript-eslint/no-explicit-any
-              "fill-color": boundaryColor as any,
-              "fill-opacity": 0.06,
-            }}
+            // eslint-disable-next-line @typescript-eslint/no-explicit-any
+            filter={boundaryFilter as any}
+            paint={{ "fill-color": NOISE_INK, "fill-opacity": 0.05 }}
           />
           <Layer
             id="limites-cluster-borde"
             type="line"
-            paint={{
-              // eslint-disable-next-line @typescript-eslint/no-explicit-any
-              "line-color": boundaryColor as any,
-              "line-width": 1.5,
-              "line-opacity": 0.35,
-            }}
+            // eslint-disable-next-line @typescript-eslint/no-explicit-any
+            filter={boundaryFilter as any}
+            paint={{ "line-color": NOISE_INK, "line-width": 1.5, "line-opacity": 0.3 }}
           />
         </Source>
       )}
@@ -341,29 +315,29 @@ export default function MapView({
           <Layer
             id="recorridos-halo"
             type="line"
+            // eslint-disable-next-line @typescript-eslint/no-explicit-any
+            filter={selectionFilter as any}
             layout={{ "line-cap": "round", "line-join": "round" }}
-            paint={{
-              "line-color": MARK_RING,
-              "line-width": 6,
-              // eslint-disable-next-line @typescript-eslint/no-explicit-any
-              "line-opacity": lineOpacity as any,
-            }}
+            paint={{ "line-color": MARK_RING, "line-width": 7, "line-opacity": 0.9 }}
           />
           <Layer
             id="recorridos-linea"
             type="line"
+            // eslint-disable-next-line @typescript-eslint/no-explicit-any
+            filter={selectionFilter as any}
             layout={{ "line-cap": "round", "line-join": "round" }}
             paint={{
               // eslint-disable-next-line @typescript-eslint/no-explicit-any
-              "line-color": lineColor as any,
-              "line-width": 3,
-              // eslint-disable-next-line @typescript-eslint/no-explicit-any
-              "line-opacity": lineOpacity as any,
+              "line-color": DAY_COLOR_EXPRESSION as any,
+              "line-width": 4,
+              "line-opacity": 0.9,
             }}
           />
           <Layer
             id="recorridos-rotulo"
             type="symbol"
+            // eslint-disable-next-line @typescript-eslint/no-explicit-any
+            filter={selectionFilter as any}
             minzoom={11}
             layout={{
               "symbol-placement": "line",
@@ -373,12 +347,9 @@ export default function MapView({
               "text-size": 11,
             }}
             paint={{
-              // eslint-disable-next-line @typescript-eslint/no-explicit-any
-              "text-color": lineColor as any,
+              "text-color": LABEL_INK,
               "text-halo-color": MARK_RING,
               "text-halo-width": 2,
-              // eslint-disable-next-line @typescript-eslint/no-explicit-any
-              "text-opacity": lineOpacity as any,
             }}
           />
         </Source>
@@ -389,10 +360,12 @@ export default function MapView({
           <Layer
             id={POINTS_LAYER}
             type="circle"
+            // eslint-disable-next-line @typescript-eslint/no-explicit-any
+            filter={selectionFilter as any}
             paint={{
               "circle-radius": ["interpolate", ["linear"], ["zoom"], 8, 4, 14, 9],
               // eslint-disable-next-line @typescript-eslint/no-explicit-any
-              "circle-color": fillColor as any,
+              "circle-color": CAMERA_COLOR as any,
               // Trazo mas grueso para cámaras reasignadas desde ruido — sin
               // sumar color nuevo, sólo distingue el outlier por contorno.
               // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -404,6 +377,8 @@ export default function MapView({
           <Layer
             id="camaras-rotulo"
             type="symbol"
+            // eslint-disable-next-line @typescript-eslint/no-explicit-any
+            filter={selectionFilter as any}
             minzoom={12}
             layout={{
               "text-field": ["get", "tag"],
@@ -413,7 +388,7 @@ export default function MapView({
               "text-allow-overlap": false,
             }}
             paint={{
-              "text-color": "#0b0b0b",
+              "text-color": LABEL_INK,
               "text-halo-color": MARK_RING,
               "text-halo-width": 1.5,
             }}
@@ -457,6 +432,8 @@ export default function MapView({
           <Layer
             id="salidas-punto"
             type="circle"
+            // eslint-disable-next-line @typescript-eslint/no-explicit-any
+            filter={boundaryFilter as any}
             paint={{
               // Anillo verde con centro blanco: misma categoría que las sedes
               // ("acá sale un vehículo") pero distinguible cuando no coinciden.
@@ -469,6 +446,8 @@ export default function MapView({
           <Layer
             id="salidas-rotulo"
             type="symbol"
+            // eslint-disable-next-line @typescript-eslint/no-explicit-any
+            filter={boundaryFilter as any}
             layout={{
               "text-field": ["get", "name"],
               "text-font": ["Noto Sans Bold"],
