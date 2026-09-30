@@ -465,16 +465,31 @@ def _check_starts_near_clusters(
             )
 
 
+class DayRules(NamedTuple):
+    """Reglas de cada jornada, tal como las eligió el usuario."""
+
+    day_budget_s: float
+    service_time_s: float
+    time_limit_s: int
+    max_stops_per_day: int | None  # None = sin tope
+    min_stops_per_day: int | None  # None = sin mínimo
+
+
+class ClusterPlan(NamedTuple):
+    """Recorridos de un cluster y las cámaras que no entraron, por motivo."""
+
+    routes: list[ClusterRoute]
+    out_of_reach: list[Camera]  # no entran ni yendo solas
+    left_out: list[Camera]  # entrarían solas; las dejó fuera el mínimo/tope
+
+
 def _route_for_cluster(
     cluster_id: int,
     members: list[Camera],
     start: ClusterStart,
     provider: RoutingProvider,
-    day_budget_s: float,
-    service_time_s: float,
-    time_limit_s: int,
-    max_stops_per_day: int | None = None,
-) -> tuple[list[ClusterRoute], list[Camera]]:
+    rules: DayRules,
+) -> ClusterPlan:
     """Arma uno o más recorridos (vehículo-jornada) para un cluster.
 
     `members[0]` nunca es el punto de partida: se antepone acá y
@@ -487,13 +502,17 @@ def _route_for_cluster(
     plan = build_day_routes(
         points,
         provider,
-        day_budget_s=day_budget_s,
-        service_time_s=service_time_s,
-        time_limit_s=time_limit_s,
-        max_stops_per_day=max_stops_per_day,
+        day_budget_s=rules.day_budget_s,
+        service_time_s=rules.service_time_s,
+        time_limit_s=rules.time_limit_s,
+        max_stops_per_day=rules.max_stops_per_day,
+        min_stops_per_day=rules.min_stops_per_day,
     )
 
-    unserved = [members[index - 1] for index in plan.unserved]
+    out_of_reach = [members[index - 1] for index in plan.out_of_reach]
+    left_out = [
+        members[index - 1] for index in plan.unserved if index not in plan.out_of_reach
+    ]
     total_days = len(plan.routes)
     routes: list[ClusterRoute] = []
     for day_index, day_route in enumerate(plan.routes, start=1):
@@ -531,7 +550,7 @@ def _route_for_cluster(
                 start_lon=start.lon,
             )
         )
-    return routes, unserved
+    return ClusterPlan(routes, out_of_reach, left_out)
 
 
 class Solved(NamedTuple):
@@ -546,12 +565,9 @@ class Solved(NamedTuple):
 def _solve_routes(
     result: Clustered,
     preference: str,
-    day_budget_s: float,
-    service_time_s: float,
     average_speed_kmh: float,
     cluster_starts: dict[int, ClusterStart],
-    time_limit_s: int,
-    max_stops_per_day: int | None = None,
+    rules: DayRules,
 ) -> Solved:
     """Elige el motor y resuelve cada cluster con presupuesto de jornada.
 
@@ -561,25 +577,20 @@ def _solve_routes(
     engine, warning = select_provider(preference, average_speed_kmh=average_speed_kmh)
 
     routes: list[ClusterRoute] = []
-    unserved: list[Camera] = []
+    out_of_reach: list[Camera] = []
+    left_out: list[Camera] = []
     for cluster in result.clusters:
         members = [
             camera for camera in result.cameras if camera.cluster == cluster.id
         ]
         if not members:
             continue
-        cluster_routes, cluster_unserved = _route_for_cluster(
-            cluster.id,
-            members,
-            cluster_starts[cluster.id],
-            engine,
-            day_budget_s,
-            service_time_s,
-            time_limit_s,
-            max_stops_per_day,
+        plan = _route_for_cluster(
+            cluster.id, members, cluster_starts[cluster.id], engine, rules
         )
-        routes.extend(cluster_routes)
-        unserved.extend(cluster_unserved)
+        routes.extend(plan.routes)
+        out_of_reach.extend(plan.out_of_reach)
+        left_out.extend(plan.left_out)
 
     avisos = [warning] if warning else []
     unreachable = sum(1 for route in routes if route.has_unreachable_legs)
@@ -588,8 +599,10 @@ def _solve_routes(
             f"{unreachable} recorrido(s) incluyen tramos que la red vial no "
             f"conecta: la distancia total informada subestima la real."
         )
-    if unserved:
-        avisos.append(_unserved_warning(unserved))
+    if out_of_reach:
+        avisos.append(_unserved_warning(out_of_reach))
+    if left_out:
+        avisos.append(_left_out_warning(left_out, rules))
 
     return Solved(
         routes,
@@ -603,11 +616,31 @@ def _solve_routes(
 MAX_UNSERVED_IDS_IN_WARNING = 10
 
 
+def _camera_listing(cameras: list[Camera]) -> str:
+    """Ids de las cámaras para un aviso, resumiendo si son muchas."""
+    ids = [camera.id for camera in cameras[:MAX_UNSERVED_IDS_IN_WARNING]]
+    resto = len(cameras) - len(ids)
+    return ", ".join(ids) + (f" y {resto} más" if resto else "")
+
+
+def _left_out_warning(left_out: list[Camera], rules: DayRules) -> str:
+    """Aviso para las cámaras que entrarían solas pero no con las reglas del día."""
+    minimo = (
+        f"el mínimo de {rules.min_stops_per_day} cámaras por día"
+        if rules.min_stops_per_day
+        else "el tope de cámaras por día"
+    )
+    return (
+        f"{len(left_out)} cámara(s) quedaron fuera de los recorridos por "
+        f"{minimo} ({_camera_listing(left_out)}): con el presupuesto de "
+        f"jornada no se pueden agrupar así. Baje el mínimo por día o suba el "
+        f"presupuesto de jornada."
+    )
+
+
 def _unserved_warning(unserved: list[Camera]) -> str:
     """Aviso para las cámaras que no entran en ninguna jornada."""
-    ids = [camera.id for camera in unserved[:MAX_UNSERVED_IDS_IN_WARNING]]
-    resto = len(unserved) - len(ids)
-    listado = ", ".join(ids) + (f" y {resto} más" if resto else "")
+    listado = _camera_listing(unserved)
     return (
         f"{len(unserved)} cámara(s) no entran en ninguna jornada desde su "
         f"punto de partida (quedan muy lejos o sin conexión vial) y quedaron "
@@ -640,6 +673,7 @@ async def optimize(
     average_speed_kmh: float = Form(35, gt=0, le=150),
     time_limit_s: int = Form(5, ge=1, le=60),
     max_stops_per_day: int = Form(0, ge=0, le=100),
+    min_stops_per_day: int = Form(0, ge=0, le=100),
 ) -> OptimizeResponse:
     """Agrupa las cámaras y resuelve el orden de visita de cada cluster.
 
@@ -652,7 +686,18 @@ async def optimize(
     informándolo en `warning`. Las cámaras marcadas como ruido por DBSCAN se
     reasignan al cluster más cercano dentro de `eps_km * noise_reassign_factor`;
     las que quedan más allá de ese radio no entran en ningún recorrido.
+    `min_stops_per_day` / `max_stops_per_day` acotan las cámaras por jornada
+    (0 = sin límite); el mínimo lo cumplen todas las jornadas salvo una.
     """
+    if max_stops_per_day and min_stops_per_day > max_stops_per_day:
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                f"El mínimo de cámaras por día ({min_stops_per_day}) no puede "
+                f"superar el máximo ({max_stops_per_day})."
+            ),
+        )
+
     result = await _ingest_and_cluster(
         file,
         col_id,
@@ -680,17 +725,21 @@ async def optimize(
         )
     _check_starts_near_clusters(result.clusters, cluster_starts)
 
+    rules = DayRules(
+        day_budget_s=day_budget_s,
+        service_time_s=service_time_s,
+        time_limit_s=time_limit_s,
+        max_stops_per_day=max_stops_per_day or None,  # 0 = sin tope
+        min_stops_per_day=min_stops_per_day or None,  # 0 = sin mínimo
+    )
     try:
         solved = await anyio.to_thread.run_sync(
             _solve_routes,
             result,
             provider,
-            day_budget_s,
-            service_time_s,
             average_speed_kmh,
             cluster_starts,
-            time_limit_s,
-            max_stops_per_day or None,  # 0 = sin tope
+            rules,
         )
     except ClusterTooLargeError as exc:
         # Es un problema del input, no del servicio: reintentar no lo arregla.

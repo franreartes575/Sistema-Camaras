@@ -444,6 +444,55 @@ def test_optimize_presupuesto_imposible_avisa_camaras_fuera(client: TestClient) 
     assert "MIC-1" in body["warning"]
 
 
+def _planilla_cruz() -> bytes:
+    """Cuatro cámaras a ~1 km de (-34.6, -58.3816), en cruz."""
+    filas = [
+        {"id_camara": "N", "latitud": -34.5910, "longitud": -58.3816},
+        {"id_camara": "S", "latitud": -34.6090, "longitud": -58.3816},
+        {"id_camara": "E", "latitud": -34.6000, "longitud": -58.3706},
+        {"id_camara": "O", "latitud": -34.6000, "longitud": -58.3926},
+    ]
+    buffer = io.BytesIO()
+    pd.DataFrame(filas).to_excel(buffer, index=False, engine="openpyxl")
+    return buffer.getvalue()
+
+
+def test_optimize_minimo_mayor_que_tope_es_error(client: TestClient) -> None:
+    """Pedir más cámaras mínimas que el tope no tiene solución: 422 explícito."""
+    response = optimizar(
+        client, _planilla_cruz(), eps_km=5, min_stops_per_day=6, max_stops_per_day=5
+    )
+
+    assert response.status_code == 422
+    assert "mínimo" in response.json()["detail"]
+
+
+def test_optimize_minimo_por_dia_avisa_las_que_quedan_fuera_por_regla(
+    client: TestClient,
+) -> None:
+    """Con 20 min por jornada sólo entra una cámara: el mínimo 2 deja tres fuera.
+
+    El aviso tiene que apuntar al mínimo, no a "quedan muy lejos": cada una
+    entraría sola.
+    """
+    centro = json.dumps({"0": {"lat": -34.6000, "lon": -58.3816, "name": "Base"}})
+    response = optimizar(
+        client,
+        _planilla_cruz(),
+        eps_km=5,
+        cluster_starts_json=centro,
+        day_budget_s=20 * 60,
+        service_time_s=600,
+        min_stops_per_day=2,
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert len(body["routes"]) == 1
+    assert "mínimo" in body["warning"]
+    assert "muy lejos" not in body["warning"]
+
+
 def test_optimize_punto_de_partida_absurdo_es_error_explicito(
     client: TestClient,
 ) -> None:

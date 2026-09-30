@@ -56,10 +56,14 @@ class DayPlan:
     """Los recorridos de un cluster más las cámaras que no entraron en ninguno.
 
     `unserved` son índices de `points` (siempre >= 1) en orden ascendente.
+    `out_of_reach` es el subconjunto que no entra ni yendo sola desde el punto
+    de partida (lejos o sin conexión vial); el resto de `unserved` sí entraría
+    sola y quedó fuera por las reglas del día (mínimo/máximo de cámaras).
     """
 
     routes: tuple[DayRoute, ...]
     unserved: tuple[int, ...]
+    out_of_reach: tuple[int, ...] = ()
 
 
 def _to_int_matrix(matrix: np.ndarray) -> list[list[int]]:
@@ -113,6 +117,7 @@ def _solve(
     day_budget_s: float,
     time_limit_s: int,
     max_stops_per_day: int | None = None,
+    min_stops_per_day: int | None = None,
 ):
     """Arma y resuelve el modelo OR-Tools multi-vehículo con presupuesto horario."""
     costs = _to_int_matrix(durations_s)
@@ -141,18 +146,50 @@ def _solve(
     for node in range(1, size):
         routing.AddDisjunction([manager.NodeToIndex(node)], DROP_PENALTY)
 
-    if max_stops_per_day:
-        # Cada cámara pesa 1 y el punto de partida 0: la capacidad del
-        # vehículo es el tope de cámaras que la cuadrilla atiende por jornada.
-        demand_index = routing.RegisterUnaryTransitCallback(
-            lambda index: 0 if manager.IndexToNode(index) == 0 else 1
-        )
-        routing.AddDimensionWithVehicleCapacity(
-            demand_index, 0, [max_stops_per_day] * num_vehicles, True, "Camaras"
+    if max_stops_per_day or min_stops_per_day:
+        _add_stop_count_rules(
+            manager, routing, num_vehicles, size, max_stops_per_day, min_stops_per_day
         )
 
     solution = routing.SolveWithParameters(default_search_parameters(time_limit_s))
     return manager, routing, solution
+
+
+def _add_stop_count_rules(
+    manager,
+    routing,
+    num_vehicles: int,
+    size: int,
+    max_stops_per_day: int | None,
+    min_stops_per_day: int | None,
+) -> None:
+    """Tope y mínimo de cámaras por jornada, sobre una dimensión de conteo.
+
+    Cada cámara pesa 1 y el punto de partida 0, así que el acumulado al final
+    de cada vehículo es la cantidad de cámaras de esa jornada. El tope es la
+    capacidad del vehículo. El mínimo lo cumplen todas las jornadas salvo una:
+    si las cámaras no se reparten justo (32 con mínimo 5), el "resto" tiene
+    que ir en algún día, y exigírselo también dejaría cámaras sin cubrir.
+    """
+    demand_index = routing.RegisterUnaryTransitCallback(
+        lambda index: 0 if manager.IndexToNode(index) == 0 else 1
+    )
+    capacity = max_stops_per_day or size  # sin tope: nunca limita
+    routing.AddDimensionWithVehicleCapacity(
+        demand_index, 0, [capacity] * num_vehicles, True, "Camaras"
+    )
+    if not min_stops_per_day or min_stops_per_day <= 1:
+        return  # mínimo 1: cualquier jornada usada ya lo cumple
+
+    count = routing.GetDimensionOrDie("Camaras")
+    solver = routing.solver()
+    # Jornada "corta": usada (>= 1 cámara) pero por debajo del mínimo. Un
+    # vehículo sin uso termina en 0 y no cuenta.
+    short_days = [
+        solver.IsBetweenVar(count.CumulVar(routing.End(vehicle)), 1, min_stops_per_day - 1)
+        for vehicle in range(num_vehicles)
+    ]
+    solver.Add(solver.Sum(short_days) <= 1)
 
 
 def _vehicle_nodes(manager, routing, solution, vehicle: int) -> list[int]:
@@ -259,6 +296,7 @@ def _solve_plan(
     day_budget_s: float,
     time_limit_s: int,
     max_stops_per_day: int | None,
+    min_stops_per_day: int | None,
 ) -> DayPlan:
     """Resuelve con `num_vehicles` y arma el plan con las cámaras descartadas."""
     manager, routing, solution = _solve(
@@ -269,6 +307,7 @@ def _solve_plan(
         day_budget_s,
         time_limit_s,
         max_stops_per_day,
+        min_stops_per_day,
     )
     if solution is None:
         # Con todas las cámaras opcionales siempre existe una solución (la
@@ -288,7 +327,12 @@ def _solve_plan(
 
     visited = {stop.index for route in routes for stop in route.stops}
     unserved = tuple(node for node in range(1, len(points)) if node not in visited)
-    return DayPlan(routes=tuple(routes), unserved=unserved)
+    out_of_reach = tuple(
+        node
+        for node in unserved
+        if not _fits_alone(durations_s, node, service_time_s, day_budget_s)
+    )
+    return DayPlan(routes=tuple(routes), unserved=unserved, out_of_reach=out_of_reach)
 
 
 def build_day_routes(
@@ -298,6 +342,7 @@ def build_day_routes(
     service_time_s: float,
     time_limit_s: int = DEFAULT_TIME_LIMIT_S,
     max_stops_per_day: int | None = None,
+    min_stops_per_day: int | None = None,
 ) -> DayPlan:
     """Reparte `points[1:]` en tantos vehículos-jornada como haga falta.
 
@@ -305,8 +350,10 @@ def build_day_routes(
     no es una cámara y nunca aparece en `DayRoute.stops`. Cada vehículo sale
     y vuelve a `points[0]` sin superar `day_budget_s` de manejo real más
     `service_time_s` por cámara visitada, ni `max_stops_per_day` cámaras si
-    se indica. El solver agrupa en cada jornada las cámaras cercanas entre sí,
-    así que el tope arma "sub-clusters" diarios sin un paso de agrupado aparte.
+    se indica. Con `min_stops_per_day`, cada jornada junta al menos esa
+    cantidad, salvo una (el "resto" cuando no se reparten justo). El solver
+    agrupa en cada jornada las cámaras cercanas entre sí, así que tope y
+    mínimo arman "sub-clusters" diarios sin un paso de agrupado aparte.
     Las cámaras que no entran en ninguna jornada vuelven en `unserved`.
     """
     num_cameras = len(points) - 1
@@ -325,6 +372,7 @@ def build_day_routes(
             day_budget_s,
             time_limit_s,
             max_stops_per_day,
+            min_stops_per_day,
         )
 
     num_vehicles = _estimate_vehicle_count(
@@ -332,10 +380,7 @@ def build_day_routes(
     )
     plan = solve(num_vehicles)
 
-    dropped_but_feasible = any(
-        _fits_alone(durations_s, node, service_time_s, day_budget_s)
-        for node in plan.unserved
-    )
+    dropped_but_feasible = len(plan.unserved) > len(plan.out_of_reach)
     if dropped_but_feasible and num_vehicles < num_cameras:
         # La estimación de vehículos se quedó corta: quedó afuera una cámara
         # que sola sí entra. Reintentar con el máximo seguro (un vehículo por

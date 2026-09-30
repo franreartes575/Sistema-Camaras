@@ -229,6 +229,59 @@ def test_sin_tope_no_cambia_el_comportamiento() -> None:
     assert len(plan.routes[0].stops) == 12
 
 
+def test_minimo_por_dia_deja_a_lo_sumo_un_dia_corto() -> None:
+    """Con mínimo 5, doce cámaras salen 5+5+2: sólo el día "resto" queda corto."""
+    plan = build_day_routes(
+        [DEPOT, *GRID],
+        HaversineProvider(average_speed_kmh=40),
+        day_budget_s=DAY_BUDGET_8H,
+        service_time_s=SERVICE_10MIN,
+        time_limit_s=2,
+        max_stops_per_day=5,
+        min_stops_per_day=5,
+    )
+
+    cortos = [route for route in plan.routes if len(route.stops) < 5]
+    assert len(cortos) <= 1
+    visitadas = sorted(stop.index for route in plan.routes for stop in route.stops)
+    assert visitadas == list(range(1, 13))
+
+
+def test_minimo_imposible_deja_camaras_fuera_por_regla_no_por_distancia() -> None:
+    """Si el presupuesto no deja juntar el mínimo, las que sobran se informan aparte.
+
+    Con 20 minutos sólo entra una cámara por jornada, así que con mínimo 2
+    únicamente el día "resto" puede salir: tres de las cuatro quedan fuera,
+    pero todas entrarían solas — no están fuera de alcance.
+    """
+    plan = build_day_routes(
+        [DEPOT, CAM_N, CAM_S, CAM_E, CAM_W],
+        HaversineProvider(average_speed_kmh=40),
+        day_budget_s=20 * 60,
+        service_time_s=SERVICE_10MIN,
+        time_limit_s=2,
+        min_stops_per_day=2,
+    )
+
+    assert len(plan.routes) == 1
+    assert len(plan.unserved) == 3
+    assert plan.out_of_reach == ()
+
+
+def test_camara_lejana_figura_como_fuera_de_alcance() -> None:
+    """`out_of_reach` distingue las que no entran ni yendo solas."""
+    plan = build_day_routes(
+        [DEPOT, CAM_N, CAM_LEJANA],
+        HaversineProvider(average_speed_kmh=40),
+        day_budget_s=DAY_BUDGET_8H,
+        service_time_s=SERVICE_10MIN,
+        time_limit_s=2,
+    )
+
+    assert plan.unserved == (2,)
+    assert plan.out_of_reach == (2,)
+
+
 def test_tope_mayor_que_el_cluster_no_divide() -> None:
     """Si el tope supera la cantidad de cámaras, sale una sola jornada."""
     plan = build_day_routes(

@@ -141,6 +141,11 @@ export type RouteParams = {
   time_limit_s: number;
   /** Tope de cámaras por jornada; 0 = sin tope (sólo corta por tiempo). */
   max_stops_per_day: number;
+  /**
+   * Mínimo de cámaras por jornada; 0 = sin mínimo. Lo cumplen todas las
+   * jornadas salvo una (el "resto" cuando no se reparten justo).
+   */
+  min_stops_per_day: number;
 };
 
 async function post<T>(path: string, body: FormData): Promise<T> {
@@ -216,5 +221,6 @@ export function optimize(
   body.append("average_speed_kmh", String(routing.average_speed_kmh));
   body.append("time_limit_s", String(routing.time_limit_s));
   body.append("max_stops_per_day", String(routing.max_stops_per_day));
+  body.append("min_stops_per_day", String(routing.min_stops_per_day));
   return post<OptimizeResponse>("/optimize/", body);
 }

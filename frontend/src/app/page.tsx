@@ -55,6 +55,7 @@ export default function Home() {
     average_speed_kmh: 35,
     time_limit_s: 5,
     max_stops_per_day: 5,
+    min_stops_per_day: 0,
   });
   const [depots, setDepots] = useState<Depot[]>([]);
   const [preview, setPreview] = useState<ProcessResponse | null>(null);

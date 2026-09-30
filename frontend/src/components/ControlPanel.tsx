@@ -41,6 +41,31 @@ type Props = {
   onSelectRoute: (cluster: number | null, day: number | null) => void;
 };
 
+const MAX_STOPS_SLIDER = 30;
+
+/**
+ * Cambia el mínimo de cámaras por día sin dejarlo por encima del tope: si lo
+ * supera, el tope sube con él (el backend rechaza mínimo > máximo).
+ */
+function withMinStops(routing: RouteParams, min: number): RouteParams {
+  const max = routing.max_stops_per_day;
+  return {
+    ...routing,
+    min_stops_per_day: min,
+    max_stops_per_day: max !== 0 && min > max ? min : max,
+  };
+}
+
+/** Cambia el tope sin dejarlo por debajo del mínimo: si baja de él, lo arrastra. */
+function withMaxStops(routing: RouteParams, max: number): RouteParams {
+  const min = routing.min_stops_per_day;
+  return {
+    ...routing,
+    max_stops_per_day: max,
+    min_stops_per_day: max !== 0 && min > max ? max : min,
+  };
+}
+
 /** Formatea metros como km con un decimal, o como metros redondos si es corto. */
 function formatDistance(meters: number | null): string {
   // null significa que la red vial no conecta el tramo, no que mida cero.
@@ -54,6 +79,23 @@ function formatDuration(seconds: number): string {
   const hours = Math.floor(totalMinutes / 60);
   const minutes = totalMinutes % 60;
   return hours === 0 ? `${minutes} min` : `${hours} h ${minutes} min`;
+}
+
+/** Totales del plan: cuántos días, cuánto tiempo y cuántos km en conjunto. */
+function RoutesSummary({ routes }: { routes: OptimizeResponse["routes"] }) {
+  const totalSeconds = routes.reduce((sum, route) => sum + route.total_duration_s, 0);
+  const totalMeters = routes.reduce((sum, route) => sum + route.total_distance_m, 0);
+  const cameras = routes.reduce((sum, route) => sum + route.stop_count, 0);
+  return (
+    <p className="rounded-md bg-slate-900 px-3 py-2 text-xs leading-relaxed text-slate-300">
+      <span className="font-medium text-slate-100">
+        {routes.length} {routes.length === 1 ? "día" : "días"}
+      </span>{" "}
+      · {cameras} cámaras · {formatDuration(totalSeconds)} en total (
+      {formatDuration(totalSeconds / routes.length)} por día en promedio) ·{" "}
+      {formatDistance(totalMeters)}
+    </p>
+  );
 }
 
 function Select({
@@ -482,7 +524,22 @@ export default function ControlPanel({
               }
             />
             <Slider
-              label="Cámaras por día"
+              label="Mínimo de cámaras por día"
+              value={routing.min_stops_per_day}
+              display={
+                routing.min_stops_per_day === 0
+                  ? "sin mínimo"
+                  : `mín. ${routing.min_stops_per_day}`
+              }
+              min={0}
+              max={MAX_STOPS_SLIDER}
+              step={1}
+              onChange={(min_stops_per_day) =>
+                onRoutingChange(withMinStops(routing, min_stops_per_day))
+              }
+            />
+            <Slider
+              label="Máximo de cámaras por día"
               value={routing.max_stops_per_day}
               display={
                 routing.max_stops_per_day === 0
@@ -490,12 +547,16 @@ export default function ControlPanel({
                   : `máx. ${routing.max_stops_per_day}`
               }
               min={0}
-              max={30}
+              max={MAX_STOPS_SLIDER}
               step={1}
               onChange={(max_stops_per_day) =>
-                onRoutingChange({ ...routing, max_stops_per_day })
+                onRoutingChange(withMaxStops(routing, max_stops_per_day))
               }
             />
+            <p className="-mt-1 text-xs text-slate-500">
+              Con mínimo y máximo iguales, cada día lleva exactamente esa cantidad
+              (salvo un día con el resto).
+            </p>
             <Slider
               label="Tiempo de servicio por parada"
               value={routing.service_time_s / 60}
@@ -574,6 +635,8 @@ export default function ControlPanel({
               </div>
             ))}
           </dl>
+
+          {result.routes.length > 0 && <RoutesSummary routes={result.routes} />}
 
           <p className="text-xs text-slate-500">
             Distancias{" "}
