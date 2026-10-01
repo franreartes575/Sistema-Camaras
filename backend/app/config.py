@@ -5,6 +5,7 @@ Todos los servicios externos son de código abierto y self-hosted:
 """
 
 import os
+from pathlib import Path
 
 # Instancia local de OSRM. Sin dependencias de Google Maps.
 OSRM_BASE_URL: str = os.getenv("OSRM_BASE_URL", "http://localhost:5000")
@@ -14,6 +15,13 @@ CORS_ORIGINS: list[str] = [
     "http://localhost:3000",
     "http://127.0.0.1:3000",
 ]
+
+# Base SQLite del registro de recorridos. Es un único archivo: respaldarlo es
+# copiarlo (o descargarlo desde la sección Registro). `data/` está ignorada por
+# git — los registros son datos de operación, no código.
+DB_PATH: str = os.getenv(
+    "DB_PATH", str(Path(__file__).resolve().parent.parent / "data" / "recorridos.db")
+)
 
 # Extensiones aceptadas en la carga de planillas.
 ALLOWED_UPLOAD_EXTENSIONS: tuple[str, ...] = (".xlsx", ".xlsm", ".csv")
@@ -41,6 +49,8 @@ RATE_LIMIT_PROCESS_MAX: int = int(os.getenv("RATE_LIMIT_PROCESS_MAX", "20"))
 # /optimize/ corre OR-Tools hasta time_limit_s por cluster: el tope más bajo
 # es a propósito, es el endpoint caro de este servicio.
 RATE_LIMIT_OPTIMIZE_MAX: int = int(os.getenv("RATE_LIMIT_OPTIMIZE_MAX", "10"))
+# El registro se consulta seguido (cada filtro es una lectura): tope holgado.
+RATE_LIMIT_REGISTRO_MAX: int = int(os.getenv("RATE_LIMIT_REGISTRO_MAX", "240"))
 
 # Si el backend corre detrás de un reverse proxy que setea `X-Forwarded-For`
 # con la IP real del cliente, esto habilita usarla para el rate limiting por

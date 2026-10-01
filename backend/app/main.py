@@ -8,7 +8,6 @@ import json
 import logging
 import math
 from contextlib import asynccontextmanager
-from pathlib import Path
 from typing import AsyncIterator, NamedTuple
 
 import anyio
@@ -18,17 +17,16 @@ from fastapi import Depends, FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 
 from .config import (
-    ALLOWED_UPLOAD_EXTENSIONS,
     API_KEY,
     CORS_ORIGINS,
-    MAX_UPLOAD_BYTES,
     RATE_LIMIT_OPTIMIZE_MAX,
     RATE_LIMIT_PROCESS_MAX,
     RATE_LIMIT_UPLOAD_MAX,
-    UPLOAD_CHUNK_BYTES,
 )
 from .export_route import router as export_router
+from .registro_route import router as registro_router
 from .security import rate_limiter, require_api_key
+from .uploads import read_upload as _read_upload
 from .schemas import (
     Camera,
     Cluster,
@@ -112,6 +110,7 @@ app.add_middleware(
 )
 
 app.include_router(export_router)
+app.include_router(registro_router)
 
 
 @app.get("/health")
@@ -122,40 +121,6 @@ def health() -> dict[str, str]:
     público a propósito.
     """
     return {"status": "ok"}
-
-
-async def _read_upload(file: UploadFile) -> tuple[str, bytes]:
-    """Valida la extensión y devuelve el contenido del archivo."""
-    filename = file.filename or "sin-nombre"
-    suffix = Path(filename).suffix.lower()
-
-    if suffix not in ALLOWED_UPLOAD_EXTENSIONS:
-        raise HTTPException(
-            status_code=400,
-            detail=(
-                f"Extensión '{suffix or 'desconocida'}' no soportada. "
-                f"Use: {', '.join(ALLOWED_UPLOAD_EXTENSIONS)}"
-            ),
-        )
-
-    chunks: list[bytes] = []
-    size = 0
-    while chunk := await file.read(UPLOAD_CHUNK_BYTES):
-        size += len(chunk)
-        if size > MAX_UPLOAD_BYTES:
-            raise HTTPException(
-                status_code=413,
-                detail=(
-                    f"El archivo supera el límite de "
-                    f"{MAX_UPLOAD_BYTES // (1024 * 1024)} MB."
-                ),
-            )
-        chunks.append(chunk)
-
-    if not chunks:
-        raise HTTPException(status_code=400, detail="El archivo llegó vacío.")
-
-    return filename, b"".join(chunks)
 
 
 @app.post(

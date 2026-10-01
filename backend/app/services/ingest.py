@@ -46,6 +46,14 @@ _DONE_MARKS = frozenset(
     {"si", "sí", "s", "x", "✓", "✔", "☑", "true", "verdadero", "1", "ok",
      "hecho", "hecha", "realizado", "realizada", "yes", "y"}
 )
+# "No" explícito en Realizado: el técnico fue y no la pudo hacer. Una celda
+# vacía, en cambio, es "sin novedad" y no cambia lo que ya figura en el registro.
+_NOT_DONE_MARKS = frozenset(
+    {"no", "n", "false", "falso", "0", "✗", "✘", "no realizado", "no realizada"}
+)
+# Columnas que lee el registro al cargar un seguimiento.
+_DATE_PATTERNS = (r"fecha",)
+_MIGRATED_PATTERNS = (r"se\s+migr", r"nodo\s+migrado", r"nodo\s+(final|real)")
 # Hasta 1e9 cubre microgrados (1e6) y las exportaciones con más precisión.
 _MAX_COORD_SCALE_EXPONENT = 9
 
@@ -123,6 +131,40 @@ def _is_done(value: object) -> bool:
     if not isinstance(value, str):
         return False
     return value.strip().lower() in _DONE_MARKS
+
+
+def reported_status(value: object) -> str | None:
+    """Estado informado en la celda "Realizado": 'realizada', 'no_realizada' o None.
+
+    None es "sin novedad" (celda vacía o texto que no es Sí ni No): quien lo
+    use no debe pisar con eso un estado ya cargado.
+    """
+    if _is_done(value):
+        return "realizada"
+    if isinstance(value, bool):  # False; bool va antes que int a propósito
+        return "no_realizada"
+    if isinstance(value, (int, float)):
+        return "no_realizada" if value == 0 else None
+    if isinstance(value, str) and value.strip().lower() in _NOT_DONE_MARKS:
+        return "no_realizada"
+    return None
+
+
+def follow_up_mapping(columns: list[str]) -> dict[str, str | None]:
+    """Columnas que el registro lee de un Excel de seguimiento completado.
+
+    Parte de `suggest_mapping` (los encabezados del Excel exportado están
+    elegidos para que los reconozca) y suma la fecha planificada y el nodo al
+    cual se migró, que el planificador no necesita.
+    """
+    base = suggest_mapping(columns)
+    return {
+        "id": base["id"],
+        "done": base["done"],
+        "observation": base["observation"],
+        "migrated_node": _match(columns, _MIGRATED_PATTERNS),
+        "date": _match(columns, _DATE_PATTERNS),
+    }
 
 
 def split_done(frame: pd.DataFrame, col_done: str | None) -> tuple[pd.DataFrame, int]:
