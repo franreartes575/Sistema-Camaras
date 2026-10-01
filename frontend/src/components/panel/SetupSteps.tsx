@@ -6,6 +6,7 @@
  */
 
 import DepotEditor from "@/components/DepotEditor";
+import CoordinateField from "@/components/ui/CoordinateField";
 import { BUTTON, Notice, Select, Slider } from "@/components/ui/controls";
 import type {
   Cluster,
@@ -141,24 +142,11 @@ function ClusterStartRow({
         <option value="custom">Coordenadas personalizadas</option>
       </select>
       {mode === "custom" && start && (
-        <div className="grid grid-cols-2 gap-2">
-          <input
-            type="number"
-            step="0.0001"
-            aria-label="Latitud de la salida"
-            value={start.lat}
-            onChange={(event) => onChange({ ...start, lat: Number(event.target.value) })}
-            className={coordInput}
-          />
-          <input
-            type="number"
-            step="0.0001"
-            aria-label="Longitud de la salida"
-            value={start.lon}
-            onChange={(event) => onChange({ ...start, lon: Number(event.target.value) })}
-            className={coordInput}
-          />
-        </div>
+        <CoordinateField
+          label="Coordenadas de la salida"
+          value={{ lat: start.lat, lon: start.lon }}
+          onChange={(coords) => onChange({ ...start, ...coords })}
+        />
       )}
     </li>
   );

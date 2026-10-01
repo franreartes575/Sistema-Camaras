@@ -2,6 +2,7 @@
 
 import { useEffect } from "react";
 
+import CoordinateField from "@/components/ui/CoordinateField";
 import { BUTTON } from "@/components/ui/controls";
 import type { Depot } from "@/lib/api";
 
@@ -89,26 +90,11 @@ export default function DepotEditor({ depots, onChange }: Props) {
                   Quitar
                 </button>
               </div>
-              <div className="grid grid-cols-2 gap-2">
-                <input
-                  type="number"
-                  step="0.0001"
-                  placeholder="Latitud"
-                  aria-label="Latitud de la sede"
-                  value={depot.lat}
-                  onChange={(event) => updateDepot(depot.id, { lat: Number(event.target.value) })}
-                  className={INPUT}
-                />
-                <input
-                  type="number"
-                  step="0.0001"
-                  placeholder="Longitud"
-                  aria-label="Longitud de la sede"
-                  value={depot.lon}
-                  onChange={(event) => updateDepot(depot.id, { lon: Number(event.target.value) })}
-                  className={INPUT}
-                />
-              </div>
+              <CoordinateField
+                label="Coordenadas de la sede"
+                value={{ lat: depot.lat, lon: depot.lon }}
+                onChange={(coords) => updateDepot(depot.id, coords)}
+              />
             </li>
           ))}
         </ul>
