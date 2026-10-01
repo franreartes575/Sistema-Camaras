@@ -1,19 +1,57 @@
 "use client";
 
+import type { RegistroSync } from "@/components/ControlPanel";
+import { followUpSummary } from "@/components/registro/ImportPanel";
 import type { ColumnMapping, CoordOrder, UploadExcelResponse } from "@/lib/api";
-import { ColumnField, Notice, Select } from "@/components/ui/controls";
-import { IconUpload } from "@/components/ui/icons";
+import { BUTTON, ColumnField, Notice, Select } from "@/components/ui/controls";
+import { IconDatabase, IconUpload } from "@/components/ui/icons";
 
 type Props = {
   upload: UploadExcelResponse | null;
   mapping: ColumnMapping;
   isLoading: boolean;
+  registroSync: RegistroSync | null;
   onFile: (file: File) => void;
   onMappingChange: (mapping: ColumnMapping) => void;
+  onOpenRegistry: () => void;
 };
 
+/** Qué pasó con el registro al subir esta planilla. */
+function RegistroSyncNotice({ sync, onOpenRegistry }: { sync: RegistroSync; onOpenRegistry: () => void }) {
+  if (sync.kind === "from-registry") {
+    return (
+      <Notice tone="info">
+        Son las tareas que faltan según el <b>registro</b>. Revisá el mapeo y
+        agrupalas para armar los próximos recorridos.
+      </Notice>
+    );
+  }
+  if (sync.kind === "error") {
+    return <Notice tone="warn">No se pudo actualizar el registro con este seguimiento: {sync.message}</Notice>;
+  }
+  return (
+    <div className="space-y-1.5">
+      <Notice tone={sync.result.matched > 0 ? "info" : "warn"}>
+        <b>{sync.result.matched > 0 ? "Registro actualizado." : "Ninguna fila coincide con el registro."}</b>{" "}
+        {followUpSummary(sync.result)}
+      </Notice>
+      <button type="button" onClick={onOpenRegistry} className={BUTTON.ghost}>
+        <IconDatabase className="h-3.5 w-3.5" /> Ver el avance en el registro
+      </button>
+    </div>
+  );
+}
+
 /** Paso 1: subir la planilla (o el Excel de seguimiento) y mapear columnas. */
-export default function FileStep({ upload, mapping, isLoading, onFile, onMappingChange }: Props) {
+export default function FileStep({
+  upload,
+  mapping,
+  isLoading,
+  registroSync,
+  onFile,
+  onMappingChange,
+  onOpenRegistry,
+}: Props) {
   const columns = upload?.columns ?? [];
   const set = (patch: Partial<ColumnMapping>) => onMappingChange({ ...mapping, ...patch });
 
@@ -118,6 +156,7 @@ export default function FileStep({ upload, mapping, isLoading, onFile, onMapping
               vuelven a planificar; las pendientes y las filas nuevas sí.
             </Notice>
           )}
+          {registroSync && <RegistroSyncNotice sync={registroSync} onOpenRegistry={onOpenRegistry} />}
         </>
       )}
     </>

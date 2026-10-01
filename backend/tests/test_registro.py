@@ -229,11 +229,23 @@ def test_reemplazar_un_plan_sin_seguimiento_no_lo_duplica(client: TestClient) ->
 
     assert response.status_code == 200
     assert response.json()["date_from"] == "2026-10-08"
-    assert response.json()["name"] == plan["name"]  # sin nombre nuevo, conserva el suyo
+    # El nombre automático sigue a las fechas nuevas.
+    assert response.json()["name"] == "Plan del 08/10 al 09/10/2026"
     assert len(client.get("/registro/planes/").json()) == 1
     assert {r["date"] for r in client.get("/registro/recorridos/").json()} == {
         "2026-10-08", "2026-10-09",
     }
+
+
+def test_reemplazar_respeta_un_nombre_puesto_a_mano(client: TestClient) -> None:
+    plan = _guardar(client)
+    client.patch(f"/registro/planes/{plan['id']}", json={"name": "Zona norte"})
+
+    response = client.put(
+        f"/registro/planes/{plan['id']}", json=_plan(_jornada("2026-10-20", 1, ["C-1"]))
+    )
+
+    assert response.json()["name"] == "Zona norte"
 
 
 def test_reemplazar_con_una_jornada_repetida_no_toca_el_plan(client: TestClient) -> None:
@@ -290,6 +302,9 @@ def test_filtros_por_fecha_plan_y_texto(client: TestClient) -> None:
     # Una cámara encuentra la jornada en que se visita; la salida también busca.
     assert fechas(q="c-3") == ["2026-10-02"]
     assert fechas(q="norte") == ["2026-10-10"]
+    tarea = _tareas(client)[("C-1", primero["id"])]
+    client.patch(f"/registro/tareas/{tarea['id']}", json={"observation": "Poste caído"})
+    assert fechas(q="poste") == ["2026-10-01"]
 
 
 def test_la_busqueda_toma_los_comodines_como_texto(client: TestClient) -> None:

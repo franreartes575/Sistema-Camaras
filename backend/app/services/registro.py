@@ -117,7 +117,9 @@ def _contains(*columns: str) -> str:
 _ROUTE_SEARCH = (
     _contains("v.salida_nombre", "v.plan_nombre")
     + " OR EXISTS (SELECT 1 FROM paradas x WHERE x.recorrido_id = v.id AND ("
-    + _contains("x.camara_id", "x.nodo_preliminar", "x.nodo_migrado", "x.descripcion")
+    + _contains(
+        "x.camara_id", "x.nodo_preliminar", "x.nodo_migrado", "x.descripcion", "x.observacion"
+    )
     + "))"
 )
 _TASK_SEARCH = _contains(
@@ -159,12 +161,16 @@ def _where(
 # --------------------------------------------------------------------------
 
 
-def _default_name(plan: RegistryPlanIn) -> str:
-    first = min(route.date for route in plan.routes)
-    last = max(route.date for route in plan.routes)
+def _range_name(first: dt.date, last: dt.date) -> str:
+    """Nombre automático de un plan según las fechas que abarca."""
     if first == last:
         return f"Plan del {first:%d/%m/%Y}"
     return f"Plan del {first:%d/%m} al {last:%d/%m/%Y}"
+
+
+def _default_name(plan: RegistryPlanIn) -> str:
+    dates = [route.date for route in plan.routes]
+    return _range_name(min(dates), max(dates))
 
 
 def _insert_routes(conn: sqlite3.Connection, plan_id: int, routes: list[RegistryRouteIn]) -> None:
@@ -243,7 +249,6 @@ def replace_plan(conn: sqlite3.Connection, plan_id: int, plan: RegistryPlanIn) -
     borraría lo informado, así que se rechaza.
     """
     with conn:
-        get_plan(conn, plan_id)
         reported = conn.execute(
             """
             SELECT COUNT(*) FROM paradas pa
@@ -257,6 +262,15 @@ def replace_plan(conn: sqlite3.Connection, plan_id: int, plan: RegistryPlanIn) -
                 f"El plan {plan_id} ya tiene {reported} tarea(s) informadas por los "
                 f"técnicos: guardalo como un plan nuevo para no perder lo cargado."
             )
+        # Si el nombre es el automático de las fechas viejas (nadie lo
+        # renombró), sigue a las fechas nuevas; uno puesto a mano se respeta.
+        current = get_plan(conn, plan_id)
+        auto_named = (
+            current.date_from is not None
+            and current.date_to is not None
+            and current.name == _range_name(current.date_from, current.date_to)
+        )
+        name = _clean(plan.name) or (_default_name(plan) if auto_named else None)
         conn.execute("DELETE FROM recorridos WHERE plan_id = ?", (plan_id,))
         conn.execute(
             """
@@ -264,10 +278,7 @@ def replace_plan(conn: sqlite3.Connection, plan_id: int, plan: RegistryPlanIn) -
             SET nombre = COALESCE(?, nombre), archivo_origen = ?, motor = ?, por_calle = ?
             WHERE id = ?
             """,
-            (
-                _clean(plan.name), _clean(plan.source_file), _clean(plan.provider),
-                int(plan.is_road_network), plan_id,
-            ),
+            (name, _clean(plan.source_file), _clean(plan.provider), int(plan.is_road_network), plan_id),
         )
         _insert_routes(conn, plan_id, plan.routes)
     return get_plan(conn, plan_id)

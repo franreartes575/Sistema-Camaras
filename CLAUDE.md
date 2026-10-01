@@ -35,6 +35,10 @@ npm run lint
 No hay tests de frontend. `npm run build` es la única verificación automática;
 corrélo siempre después de tocar `.tsx`.
 
+La app tiene dos secciones, Planificar y Registro, que se eligen en el
+encabezado (`app/page.tsx`); las dos quedan montadas y se ocultan con CSS, así
+que ir y volver no pierde el estado de ninguna.
+
 El panel lateral es una secuencia de pasos (`components/ui/Step.tsx`):
 `ControlPanel.tsx` sólo decide estado y plegado de cada uno; el contenido está
 en `components/panel/`. Las fechas del plan se calculan en `lib/planDates.ts`
@@ -61,6 +65,9 @@ planilla .xlsx → encabezados + mapeo sugerido → validación de coordenadas
               → DBSCAN (agrupa por cercanía) → VRP por cluster (jornadas)
               → fechas → Excel de seguimiento → técnicos lo completan
               → se vuelve a subir: lo realizado se aparta, lo pendiente se replanifica
+
+exportar guarda el plan en el registro (SQLite) → subir el seguimiento
+              actualiza el estado de cada tarea → "lo que falta" vuelve al paso 1
 ```
 
 ### El Excel de seguimiento es también una planilla de entrada
@@ -86,15 +93,55 @@ Por eso:
 La jornada con menos cámaras queda siempre última (`_lightest_day_last` en
 `vrp.py`): es la que tiene lugar para sumarle lo que quede pendiente.
 
-### El backend no guarda estado
+### El planificador no guarda estado; el registro sí
 
-El archivo se **reenvía completo en cada llamada** junto con el mapeo de
-columnas. No hay sesión, ni temporales que limpiar, ni caché entre requests.
-Reajustar `eps_km` es simplemente volver a postear. Si vas a agregar un
-endpoint, mantené esa propiedad.
+En `/upload-excel/`, `/process/`, `/optimize/` y `/export/` el archivo se
+**reenvía completo en cada llamada** junto con el mapeo de columnas. No hay
+sesión, ni temporales que limpiar, ni caché entre requests. Reajustar `eps_km`
+es simplemente volver a postear. Si vas a agregar un endpoint al planificador,
+mantené esa propiedad.
+
+Lo único con estado es el **registro** (`registro_route.py`, prefijo
+`/registro/`): una base SQLite en `DB_PATH` (por defecto
+`backend/data/recorridos.db`, ignorada por git). No toques la base desde los
+endpoints del planificador: el frontend guarda el plan llamando a
+`/registro/planes/` antes de `/export/`.
 
 `_ingest_and_cluster()` en `main.py` es el tramo compartido por `/process/` y
 `/optimize/`; toda lógica nueva de ingesta va ahí, no duplicada.
+
+### Registro de recorridos
+
+- El esquema vive en `app/esquema.sql` (todo `IF NOT EXISTS`) y lo aplica
+  `database.connect()` al abrir la base; `SCHEMA_VERSION` va a
+  `PRAGMA user_version`. Si cambiás una tabla existente, subí la versión y
+  escribí la migración: `IF NOT EXISTS` no altera tablas ya creadas.
+- Las columnas de la base están en castellano (es lo que ve quien la abre con
+  un cliente SQL) y la API mantiene los nombres en inglés del resto del
+  backend: la traducción está en los alias de los SELECT de
+  `services/registro.py`.
+- **"Reprogramada" no se guarda, se deriva** en la vista `v_paradas`: una
+  tarea no realizada cuya cámara aparece en un plan con id mayor. Así borrar o
+  reemplazar un plan nunca deja marcas viejas. El estado guardado sólo puede
+  ser `pendiente`, `realizada` o `no_realizada` (hay un CHECK).
+- Al cargar un seguimiento, **una celda vacía en "Realizado" no cambia el
+  estado** (`reported_status` devuelve None): un Excel parcial no deshace lo ya
+  informado. "No" marca `no_realizada`. Cargar dos veces el mismo archivo es
+  idempotente; el sha256 sólo sirve para avisarlo.
+- El Excel exportado lleva el id del plan en la hoja oculta `_registro`
+  (`read_plan_id`). Sin ella, el cruce es por cámara + fecha, prefiriendo el
+  plan más nuevo.
+- `PUT /registro/planes/{id}` reemplaza un plan **sólo si no tiene
+  seguimiento** (409 si no). El frontend (`persistPlan` en `page.tsx`) lo usa
+  mientras se siga trabajando sobre la misma planilla —mover fechas,
+  recalcular— para no duplicar el plan; ante 409 o 404 guarda uno nuevo. Si el
+  nombre era el automático, sigue a las fechas nuevas.
+- El respaldo usa `VACUUM INTO`, no `conn.serialize()`: la base está en modo
+  WAL y serializarla copia esa marca en el encabezado, y el archivo resultante
+  no abre sin su `-wal`.
+- Los tests escriben en una base temporal por test (fixture autouse
+  `_base_temporal` en `conftest.py`). El limitador del registro está en
+  `_LIMITADORES`.
 
 ### La capa de ruteo está abstraída a propósito
 
@@ -175,6 +222,21 @@ para el usuario (sólo queda un error en consola):
 - `["at", i, ["literal", [colores]]]` como color es **inválido**: el literal se
   tipa como `array<string>`. Usá `match` sobre el índice.
 
+### El mapa del registro no colorea por día
+
+En el registro conviven jornadas de días y planes distintos: los cinco colores
+de `DAY_PALETTE` no alcanzan y su verde y su rojo chocarían con los estados.
+Ahí todas las líneas van en `ROUTE_LINE` con su rótulo de fecha, la jornada
+enfocada en `ROUTE_LINE_FOCUS` y las demás atenuadas.
+
+El **estado** de cada tarea (`STATUS_INK` en `lib/vizTokens.ts`) nunca va sólo
+con color: verde y rojo no se distinguen con deuteranopía (medido). En el panel
+lleva ícono + rótulo (`StatusBadge`); en el mapa, un ícono dibujado en canvas
+(`lib/statusIcons.ts`) porque el servidor de glifos no trae ✓ ni ✕; en las
+barras apiladas, lo pendiente va entre lo realizado y lo no realizado. La capa
+de íconos se monta recién después de `addStatusIcons` (en `onLoad`), así nunca
+pide una imagen que todavía no está registrada.
+
 ### Avisos de plausibilidad
 
 `bounding_span_km()` mide cuánto abarcan los puntos válidos. Si supera
@@ -201,6 +263,13 @@ recorridos quedarían de un píxel.
   archivo.
 - `osrm/data/` pesa cientos de MB y está ignorado por git: se reconstruye con
   `preparar.ps1`.
+- `backend/data/recorridos.db` es la base del registro (más sus `-wal` y
+  `-shm` mientras el backend corre). Para respaldarla, copiala con el backend
+  detenido o usá el botón **Respaldo** de la sección Registro.
+- El lint usa las reglas del React Compiler (`react-hooks` 7): no se puede
+  llamar a `setState` sincrónicamente dentro de un `useEffect` (hacelo en el
+  `.then` de la promesa o en un timer), y un `useMemo` cuyo cálculo muta
+  objetos falla con `preserve-manual-memoization`.
 
 ## Antes de exponerlo a la red
 

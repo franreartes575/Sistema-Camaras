@@ -62,3 +62,29 @@ export const DAY_COLOR_EXPRESSION = [
   ...DAY_PALETTE.slice(0, -1).flatMap((color, index) => [index, color]),
   DAY_PALETTE[DAY_PALETTE.length - 1],
 ];
+
+/**
+ * Estado de cada tarea del registro. Es la escala de estado (fija, nunca por
+ * tema), distinta de los slots categóricos para no hacerse pasar por un día.
+ *
+ * Verde y rojo NO se distinguen con deuteranopía (ΔE 4.1 medido con el script
+ * de la skill dataviz contra el panel slate-900): por eso un estado nunca va
+ * sólo con color. En el panel lleva ícono + rótulo; en el mapa, un ícono
+ * dibujado (✓, ✕, punto hueco, flecha) — ver `lib/statusIcons.ts`; y en las
+ * barras apiladas lo pendiente va entre lo realizado y lo no realizado, así
+ * el par verde/rojo nunca queda contiguo.
+ */
+export const STATUS_INK = {
+  realizada: "#0ca30c",
+  no_realizada: "#d03b3b",
+  // Neutros: "falta y nadie informó nada" y "ya está en otro plan".
+  pendiente: "#94a3b8",
+  reprogramada: "#64748b",
+} as const;
+
+/** Lo pendiente en el mapa va hueco: aro oscuro sobre blanco, lejos del verde y el rojo. */
+export const PENDING_RING = "#334155";
+
+/** Línea de los recorridos del registro; la jornada enfocada pasa a SERIES_SELECTED. */
+export const ROUTE_LINE = SERIES_BASE;
+export const ROUTE_LINE_FOCUS = SERIES_SELECTED;

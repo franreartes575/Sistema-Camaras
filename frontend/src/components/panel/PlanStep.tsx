@@ -2,8 +2,9 @@
 
 /** Paso 5: el plan — días con su fecha, totales y exportación a Excel. */
 
+import type { RegistroStatus } from "@/components/ControlPanel";
 import { BUTTON, INPUT_CLASS, Notice, Stat, Toggle } from "@/components/ui/controls";
-import { IconCalendar, IconDownload } from "@/components/ui/icons";
+import { IconCalendar, IconCheck, IconDatabase, IconDownload } from "@/components/ui/icons";
 import type { ClusterRoute, OptimizeResponse } from "@/lib/api";
 import { formatDistance, formatDuration, formatWeekday } from "@/lib/format";
 import { routeKey } from "@/lib/planDates";
@@ -22,7 +23,76 @@ type Props = {
   onRouteDateChange: (key: string, iso: string) => void;
   onSelectRoute: (cluster: number | null, day: number | null) => void;
   onExport: () => void;
+  registroStatus: RegistroStatus;
+  savedPlanName: string | null;
+  isSavingPlan: boolean;
+  registroNotice: { tone: "warn" | "error"; text: string } | null;
+  onSaveToRegistry: () => void;
+  onOpenRegistry: () => void;
 };
+
+/** Si el plan está guardado en el registro y cómo guardarlo o actualizarlo. */
+function RegistroBox({
+  status,
+  planName,
+  isSaving,
+  notice,
+  onSave,
+  onOpen,
+}: {
+  status: RegistroStatus;
+  planName: string | null;
+  isSaving: boolean;
+  notice: { tone: "warn" | "error"; text: string } | null;
+  onSave: () => void;
+  onOpen: () => void;
+}) {
+  return (
+    <div className="space-y-2 rounded-lg border border-slate-800 p-3">
+      <div className="flex items-start gap-2.5">
+        <span
+          className={`mt-0.5 flex h-7 w-7 shrink-0 items-center justify-center rounded-md ${
+            status === "saved" ? "bg-emerald-500/15 text-emerald-300" : "bg-slate-800 text-slate-400"
+          }`}
+        >
+          {status === "saved" ? <IconCheck className="h-4 w-4" /> : <IconDatabase className="h-4 w-4" />}
+        </span>
+        <div className="min-w-0 flex-1 text-xs leading-relaxed">
+          {status === "saved" && (
+            <>
+              <p className="font-medium text-slate-100">Guardado en el registro</p>
+              <p className="truncate text-slate-500">{planName}</p>
+            </>
+          )}
+          {status === "outdated" && (
+            <>
+              <p className="font-medium text-amber-200">El plan cambió desde que se guardó</p>
+              <p className="truncate text-slate-500">{planName}</p>
+              <p className="text-slate-500">Al exportar se actualiza solo, o actualizalo ahora.</p>
+            </>
+          )}
+          {status === "unsaved" && (
+            <>
+              <p className="font-medium text-slate-200">Todavía no está en el registro</p>
+              <p className="text-slate-500">Se guarda solo al exportar el Excel.</p>
+            </>
+          )}
+        </div>
+      </div>
+      <div className="flex flex-wrap gap-1">
+        {status !== "saved" && (
+          <button type="button" onClick={onSave} disabled={isSaving} className={BUTTON.ghost}>
+            {isSaving ? "Guardando…" : status === "outdated" ? "Actualizar registro" : "Guardar sin exportar"}
+          </button>
+        )}
+        <button type="button" onClick={onOpen} className={BUTTON.ghost}>
+          Ver el registro
+        </button>
+      </div>
+      {notice && <Notice tone={notice.tone}>{notice.text}</Notice>}
+    </div>
+  );
+}
 
 function PlanTotals({ result }: { result: OptimizeResponse }) {
   const { routes, stats } = result;
@@ -132,6 +202,12 @@ export default function PlanStep({
   onRouteDateChange,
   onSelectRoute,
   onExport,
+  registroStatus,
+  savedPlanName,
+  isSavingPlan,
+  registroNotice,
+  onSaveToRegistry,
+  onOpenRegistry,
 }: Props) {
   if (result.routes.length === 0) {
     return <Notice tone="warn">No se pudo armar ningún recorrido con estas reglas.</Notice>;
@@ -195,9 +271,18 @@ export default function PlanStep({
       <p className="text-xs leading-relaxed text-slate-500">
         Los técnicos completan <b className="text-slate-400">Realizado</b>,{" "}
         <b className="text-slate-400">Observación</b> y el nodo. Después lo subís
-        en el paso 1: lo hecho se descarta y lo pendiente (más las filas nuevas
-        que agregues) se vuelve a planificar.
+        en el paso 1 (o en el Registro): se actualiza el avance, lo hecho se
+        descarta y lo pendiente (más las filas nuevas que agregues) se vuelve a
+        planificar.
       </p>
+      <RegistroBox
+        status={registroStatus}
+        planName={savedPlanName}
+        isSaving={isSavingPlan}
+        notice={registroNotice}
+        onSave={onSaveToRegistry}
+        onOpen={onOpenRegistry}
+      />
 
       {result.discarded.length > 0 && (
         <details className="text-xs text-slate-400">

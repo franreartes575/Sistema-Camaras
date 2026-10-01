@@ -3,9 +3,10 @@
 import dynamic from "next/dynamic";
 import { useCallback, useMemo, useState } from "react";
 
-import ControlPanel from "@/components/ControlPanel";
+import ControlPanel, { type RegistroSync } from "@/components/ControlPanel";
 import { loadDepots } from "@/components/DepotEditor";
-import { IconList, IconMap, IconRoute } from "@/components/ui/icons";
+import RegistroView from "@/components/registro/RegistroView";
+import { IconCalendar, IconDatabase, IconList, IconMap, IconRoute } from "@/components/ui/icons";
 import {
   exportPlan,
   optimize,
@@ -21,7 +22,15 @@ import {
   type RouteParams,
   type UploadExcelResponse,
 } from "@/lib/api";
+import { downloadBlob } from "@/lib/download";
 import { assignRouteDates, firstWorkingDay, routeKey, todayIso } from "@/lib/planDates";
+import {
+  importFollowUp,
+  RegistryError,
+  savePlan,
+  type PlanSummary,
+  type RegistryPlanIn,
+} from "@/lib/registro";
 
 // MapLibre toca `window`, asi que el mapa se carga solo en el cliente.
 const MapView = dynamic(() => import("@/components/MapView"), {
@@ -47,19 +56,17 @@ const EMPTY_MAPPING: ColumnMapping = {
 };
 
 type MobileView = "panel" | "map";
+type Section = "plan" | "registro";
+
+/**
+ * Último plan guardado en el registro: de qué planilla y resultado salió y con
+ * qué fechas. Mientras se siga trabajando sobre la misma planilla (recalcular,
+ * mover fechas), guardar reemplaza ese plan en vez de crear otro.
+ */
+type SavedPlan = { file: File | null; result: OptimizeResponse; datesKey: string; plan: PlanSummary };
 
 function errorMessage(err: unknown): string {
   return err instanceof Error ? err.message : "Error desconocido";
-}
-
-/** Dispara la descarga de un archivo generado en memoria. */
-function downloadBlob(blob: Blob, filename: string): void {
-  const url = URL.createObjectURL(blob);
-  const link = document.createElement("a");
-  link.href = url;
-  link.download = filename;
-  link.click();
-  URL.revokeObjectURL(url);
 }
 
 /** El plan en el formato que espera /export/, con la fecha de cada día. */
@@ -83,6 +90,40 @@ function toExportDays(
       observation: cameras.get(stop.camera_id)?.observation ?? null,
     })),
   }));
+}
+
+/** El plan como lo guarda el registro: jornadas con fecha, paradas y polilínea. */
+function toRegistryPlan(
+  result: OptimizeResponse,
+  routeDates: Record<string, string>,
+  sourceFile: string | null,
+): RegistryPlanIn {
+  const cameras = new Map(result.cameras.map((camera) => [camera.id, camera]));
+  return {
+    source_file: sourceFile,
+    provider: result.provider,
+    is_road_network: result.is_road_network,
+    routes: result.routes.map((route) => ({
+      date: routeDates[routeKey(route)],
+      cluster_id: route.cluster_id,
+      day: route.vehicle_day,
+      start_name: route.start_name,
+      start_lat: route.start_lat,
+      start_lon: route.start_lon,
+      distance_m: route.total_distance_m,
+      duration_s: route.total_duration_s,
+      has_unreachable_legs: route.has_unreachable_legs,
+      geometry: route.geometry,
+      stops: route.stops.map((stop) => ({
+        camera_id: stop.camera_id,
+        lat: stop.lat,
+        lon: stop.lon,
+        label: stop.label,
+        node: cameras.get(stop.camera_id)?.node ?? null,
+        observation: cameras.get(stop.camera_id)?.observation ?? null,
+      })),
+    })),
+  };
 }
 
 export default function Home() {
@@ -119,11 +160,26 @@ export default function Home() {
   const [isExporting, setIsExporting] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [mobileView, setMobileView] = useState<MobileView>("panel");
+  const [section, setSection] = useState<Section>("plan");
+  // El registro se monta la primera vez que se abre y después queda montado
+  // (oculto) para no perder sus filtros ni su selección al ir y volver.
+  const [registroOpened, setRegistroOpened] = useState(false);
+  // Se incrementa cuando el planificador cambia algo en el registro.
+  const [registroVersion, setRegistroVersion] = useState(0);
+  const [savedPlan, setSavedPlan] = useState<SavedPlan | null>(null);
+  const [isSavingPlan, setIsSavingPlan] = useState(false);
+  const [registroNotice, setRegistroNotice] = useState<{ tone: "warn" | "error"; text: string } | null>(null);
+  const [registroSync, setRegistroSync] = useState<RegistroSync | null>(null);
 
   const routeDates = useMemo(
     () => assignRouteDates(result?.routes ?? [], { start: planStart, skipWeekends }, dateOverrides),
     [result, planStart, skipWeekends, dateOverrides],
   );
+
+  const openSection = useCallback((next: Section) => {
+    setSection(next);
+    if (next === "registro") setRegistroOpened(true);
+  }, []);
 
   const clearSelection = useCallback(() => {
     setSelectedCluster(null);
@@ -160,12 +216,13 @@ export default function Home() {
   }, []);
 
   const handleFile = useCallback(
-    async (picked: File) => {
+    async (picked: File, origin: "usuario" | "registro" = "usuario") => {
       setIsLoading(true);
       setError(null);
       clearSelection();
       setFile(picked);
       clearPreview();
+      setRegistroSync(origin === "registro" ? { file: picked, kind: "from-registry" } : null);
 
       try {
         const response = await uploadExcel(picked);
@@ -184,6 +241,18 @@ export default function Home() {
           col_obs: suggested.observation ?? "",
           col_done: suggested.done ?? "",
         });
+        // Un Excel de seguimiento completado también actualiza el registro: lo
+        // que informaron los técnicos queda guardado aunque no se replanifique.
+        // Corre aparte, sin frenar el flujo del planificador.
+        if (origin === "usuario" && suggested.done) {
+          importFollowUp(picked).then(
+            (result) => {
+              setRegistroSync({ file: picked, kind: "synced", result });
+              setRegistroVersion((version) => version + 1);
+            },
+            (err: unknown) => setRegistroSync({ file: picked, kind: "error", message: errorMessage(err) }),
+          );
+        }
       } catch (err) {
         setUpload(null);
         setError(errorMessage(err));
@@ -235,25 +304,107 @@ export default function Home() {
     }
   }, [file, mapping, params, routing, clusterStarts, clearSelection]);
 
+  // Estado del plan actual en el registro: guardado tal cual, guardado con
+  // otras fechas (hay que actualizarlo) o sin guardar.
+  const datesKey = JSON.stringify(routeDates);
+  const savedForPlan =
+    savedPlan && result && (savedPlan.result === result || savedPlan.file === file) ? savedPlan : null;
+  const registroStatus = !savedForPlan
+    ? "unsaved"
+    : savedForPlan.result === result && savedForPlan.datesKey === datesKey
+      ? "saved"
+      : "outdated";
+
+  /** Fecha faltante en algún día, o null si todas están. */
+  const missingDateError = useCallback(() => {
+    if (!result) return null;
+    const route = result.routes.find((candidate) => !routeDates[routeKey(candidate)]);
+    return route
+      ? `Falta la fecha del día ${route.vehicle_day}: elegila en la lista antes de exportar.`
+      : null;
+  }, [result, routeDates]);
+
+  /**
+   * Guarda el plan en el registro y devuelve su resumen. Si ya está guardado
+   * tal cual no hace nada; si cambió (fechas o recálculo sobre la misma
+   * planilla) reemplaza el guardado. Si ese ya tiene seguimiento cargado (409)
+   * o lo borraron del registro (404), lo guarda como un plan nuevo.
+   */
+  const persistPlan = useCallback(async (): Promise<PlanSummary | null> => {
+    if (!result) return null;
+    if (registroStatus === "saved" && savedForPlan) return savedForPlan.plan;
+    const payload = toRegistryPlan(result, routeDates, upload?.filename ?? null);
+    let plan: PlanSummary;
+    try {
+      plan = await savePlan(payload, savedForPlan?.plan.id ?? null);
+    } catch (err) {
+      const replaceable = err instanceof RegistryError && (err.status === 404 || err.status === 409);
+      if (!savedForPlan || !replaceable) throw err;
+      plan = await savePlan(payload, null);
+    }
+    setSavedPlan({ file, result, datesKey, plan });
+    setRegistroVersion((version) => version + 1);
+    return plan;
+  }, [result, routeDates, datesKey, registroStatus, savedForPlan, upload, file]);
+
+  const handleSaveToRegistry = useCallback(async () => {
+    const missing = missingDateError();
+    if (missing) {
+      setError(missing);
+      return;
+    }
+    setIsSavingPlan(true);
+    setRegistroNotice(null);
+    try {
+      await persistPlan();
+    } catch (err) {
+      setRegistroNotice({ tone: "error", text: `No se pudo guardar en el registro: ${errorMessage(err)}` });
+    } finally {
+      setIsSavingPlan(false);
+    }
+  }, [missingDateError, persistPlan]);
+
   const handleExport = useCallback(async () => {
     if (!result) return;
-    const days = toExportDays(result, routeDates);
-    const withoutDate = days.find((day) => !day.date);
-    if (withoutDate) {
-      setError(`Falta la fecha del día ${withoutDate.day}: elegila en la lista antes de exportar.`);
+    const missing = missingDateError();
+    if (missing) {
+      setError(missing);
       return;
     }
     setIsExporting(true);
     setError(null);
+    setRegistroNotice(null);
+    // Exportar también guarda: el Excel lleva el id del plan y, cuando vuelva
+    // completado, actualiza justo este plan. Si el registro falla, el Excel
+    // sale igual — los técnicos no tienen por qué esperar.
+    let planId: number | null = null;
     try {
-      const { blob, filename } = await exportPlan(days);
+      planId = (await persistPlan())?.id ?? null;
+    } catch (err) {
+      setRegistroNotice({
+        tone: "warn",
+        text: `El Excel se exportó, pero no se pudo guardar en el registro: ${errorMessage(err)}`,
+      });
+    }
+    try {
+      const { blob, filename } = await exportPlan(toExportDays(result, routeDates), planId);
       downloadBlob(blob, filename);
     } catch (err) {
       setError(errorMessage(err));
     } finally {
       setIsExporting(false);
     }
-  }, [result, routeDates]);
+  }, [result, routeDates, missingDateError, persistPlan]);
+
+  /** Tareas pendientes del registro → paso 1 del planificador. */
+  const handlePlanTasks = useCallback(
+    (picked: File) => {
+      setSection("plan");
+      setMobileView("panel");
+      void handleFile(picked, "registro");
+    },
+    [handleFile],
+  );
 
   const handleRouteDateChange = useCallback((key: string, iso: string) => {
     setDateOverrides((prev) => ({ ...prev, [key]: iso }));
@@ -278,22 +429,42 @@ export default function Home() {
           <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-sky-500/15 text-sky-300 ring-1 ring-sky-400/30">
             <IconRoute className="h-4 w-4" />
           </span>
-          <div className="min-w-0">
+          <div className="hidden min-w-0 sm:block">
             <h1 className="truncate text-sm font-semibold tracking-tight">Recorridos de cámaras</h1>
             <p className="truncate text-[11px] text-slate-500">Planificación de cuadrillas · Salta</p>
           </div>
         </div>
+        <nav aria-label="Sección" className="flex gap-1 rounded-lg bg-slate-900 p-1">
+          {(
+            [
+              ["plan", "Planificar", IconCalendar],
+              ["registro", "Registro", IconDatabase],
+            ] as const
+          ).map(([id, label, Icon]) => (
+            <button
+              key={id}
+              type="button"
+              onClick={() => openSection(id)}
+              aria-current={section === id ? "page" : undefined}
+              className={`inline-flex items-center gap-1.5 rounded-md px-3 py-1.5 text-xs font-semibold transition ${
+                section === id ? "bg-sky-500 text-slate-950 shadow-sm" : "text-slate-400 hover:text-slate-100"
+              }`}
+            >
+              <Icon className="h-3.5 w-3.5" /> {label}
+            </button>
+          ))}
+        </nav>
         <nav aria-label="Vista" className="flex gap-1 rounded-lg bg-slate-900 p-1 md:hidden">
           <button type="button" onClick={() => setMobileView("panel")} aria-pressed={mobileView === "panel"} className={viewTab("panel")}>
-            <IconList className="h-3.5 w-3.5" /> Plan
+            <IconList className="h-3.5 w-3.5" /> <span className="sr-only sm:not-sr-only">Lista</span>
           </button>
           <button type="button" onClick={() => setMobileView("map")} aria-pressed={mobileView === "map"} className={viewTab("map")}>
-            <IconMap className="h-3.5 w-3.5" /> Mapa
+            <IconMap className="h-3.5 w-3.5" /> <span className="sr-only sm:not-sr-only">Mapa</span>
           </button>
         </nav>
       </header>
 
-      <div className="flex min-h-0 flex-1">
+      <div className={`${section === "plan" ? "flex" : "hidden"} min-h-0 flex-1`}>
         <aside
           className={`${mobileView === "panel" ? "block" : "hidden"} w-full overflow-y-auto border-slate-800 md:block md:w-[23rem] md:shrink-0 md:border-r lg:w-[25rem]`}
         >
@@ -328,6 +499,13 @@ export default function Home() {
               onSkipWeekendsChange={setSkipWeekends}
               onRouteDateChange={handleRouteDateChange}
               onExport={handleExport}
+              registroStatus={registroStatus}
+              savedPlanName={savedForPlan?.plan.name ?? null}
+              isSavingPlan={isSavingPlan}
+              registroNotice={registroNotice}
+              registroSync={registroSync?.file === file ? registroSync : null}
+              onSaveToRegistry={handleSaveToRegistry}
+              onOpenRegistry={() => openSection("registro")}
             />
           </div>
         </aside>
@@ -349,6 +527,19 @@ export default function Home() {
           />
         </section>
       </div>
+
+      {registroOpened && (
+        <div className={`${section === "registro" ? "flex" : "hidden"} min-h-0 flex-1`}>
+          <RegistroView
+            refreshKey={registroVersion}
+            mobileView={mobileView}
+            onShowMap={() => {
+              if (window.matchMedia("(max-width: 767px)").matches) setMobileView("map");
+            }}
+            onPlanTasks={handlePlanTasks}
+          />
+        </div>
+      )}
     </main>
   );
 }
