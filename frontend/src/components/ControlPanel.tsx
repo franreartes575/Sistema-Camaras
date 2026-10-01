@@ -1,0 +1,219 @@
+"use client";
+
+/**
+ * Panel lateral: la planificación como una secuencia de cinco pasos.
+ *
+ * Este componente sólo decide el estado de cada paso (bloqueado, activo,
+ * listo), cuál está desplegado y qué resumen muestra plegado; el contenido de
+ * cada paso vive en `components/panel/`.
+ */
+
+import { useState } from "react";
+
+import FileStep from "@/components/panel/FileStep";
+import PlanStep from "@/components/panel/PlanStep";
+import { ClusterStep, RulesStep, StartsStep } from "@/components/panel/SetupSteps";
+import { Notice } from "@/components/ui/controls";
+import { IconCalendar, IconLayers, IconPin, IconSheet, IconSliders } from "@/components/ui/icons";
+import Step, { type StepStatus } from "@/components/ui/Step";
+import type {
+  ClusterParams,
+  ClusterStart,
+  ColumnMapping,
+  Depot,
+  OptimizeResponse,
+  ProcessResponse,
+  RouteParams,
+  UploadExcelResponse,
+} from "@/lib/api";
+
+type Props = {
+  upload: UploadExcelResponse | null;
+  mapping: ColumnMapping;
+  params: ClusterParams;
+  routing: RouteParams;
+  depots: Depot[];
+  preview: ProcessResponse | null;
+  clusterStarts: Record<number, ClusterStart>;
+  result: OptimizeResponse | null;
+  isLoading: boolean;
+  error: string | null;
+  selectedCluster: number | null;
+  selectedDay: number | null;
+  routeDates: Record<string, string>;
+  planStart: string;
+  skipWeekends: boolean;
+  isExporting: boolean;
+  onFile: (file: File) => void;
+  onMappingChange: (mapping: ColumnMapping) => void;
+  onParamsChange: (params: ClusterParams) => void;
+  onRoutingChange: (routing: RouteParams) => void;
+  onDepotsChange: (depots: Depot[]) => void;
+  onClusterStartsChange: (starts: Record<number, ClusterStart>) => void;
+  onPreview: () => void;
+  onOptimize: () => void;
+  /** Resalta una jornada (cluster + día); `(null, null)` deselecciona. */
+  onSelectRoute: (cluster: number | null, day: number | null) => void;
+  onPlanStartChange: (iso: string) => void;
+  onSkipWeekendsChange: (skip: boolean) => void;
+  onRouteDateChange: (key: string, iso: string) => void;
+  onExport: () => void;
+};
+
+type StepId = "file" | "cluster" | "starts" | "rules" | "plan";
+
+function hasCoordinateColumns(mapping: ColumnMapping): boolean {
+  return mapping.mode === "single"
+    ? Boolean(mapping.col_coords)
+    : Boolean(mapping.col_lat && mapping.col_lon);
+}
+
+function rulesSummary(routing: RouteParams): string {
+  const { min_stops_per_day: min, max_stops_per_day: max } = routing;
+  const perDay =
+    min && max ? (min === max ? `${min}` : `${min}–${max}`) : max ? `hasta ${max}` : min ? `${min}+` : "sin límite de";
+  return `${routing.day_budget_s / 3600} h · ${perDay} cámaras/día · ${routing.service_time_s / 60} min c/u`;
+}
+
+export default function ControlPanel(props: Props) {
+  const { upload, mapping, routing, preview, clusterStarts, result, isLoading, error } = props;
+  const [expanded, setExpanded] = useState<Partial<Record<StepId, boolean>>>({});
+
+  const mappingReady = Boolean(upload && mapping.col_id && hasCoordinateColumns(mapping));
+  const missingStarts =
+    preview?.clusters.filter((cluster) => clusterStarts[cluster.id] === undefined).length ?? 0;
+  const startsReady = preview !== null && preview.clusters.length > 0 && missingStarts === 0;
+
+  const status: Record<StepId, StepStatus> = {
+    file: preview ? "done" : "active",
+    cluster: !mappingReady ? "locked" : preview ? "done" : "active",
+    starts: !preview ? "locked" : startsReady ? "done" : "active",
+    rules: !startsReady ? "locked" : result ? "done" : "active",
+    plan: result ? "active" : "locked",
+  };
+  // Sin elección explícita del usuario, se despliega lo que está por hacerse.
+  const isOpen = (id: StepId) => expanded[id] ?? status[id] === "active";
+  const toggle = (id: StepId) => setExpanded((prev) => ({ ...prev, [id]: !isOpen(id) }));
+  const stepProps = (id: StepId) => ({ status: status[id], isOpen: isOpen(id), onToggle: () => toggle(id) });
+
+  const assigned = preview ? preview.clusters.length - missingStarts : 0;
+
+  return (
+    <div>
+      {error && (
+        <div className="mb-4">
+          <Notice tone="error">{error}</Notice>
+        </div>
+      )}
+      {result?.warning && (
+        <div className="mb-4">
+          <Notice tone="warn">{result.warning}</Notice>
+        </div>
+      )}
+
+      <Step
+        number={1}
+        title="Planilla"
+        icon={<IconSheet />}
+        summary={upload ? `${upload.filename}${mapping.col_done ? " · seguimiento" : ""}` : undefined}
+        {...stepProps("file")}
+      >
+        <FileStep
+          upload={upload}
+          mapping={mapping}
+          isLoading={isLoading && !upload}
+          onFile={props.onFile}
+          onMappingChange={props.onMappingChange}
+        />
+      </Step>
+
+      <Step
+        number={2}
+        title="Agrupar cámaras"
+        icon={<IconLayers />}
+        lockedHint="Primero subí la planilla y elegí las columnas."
+        summary={
+          preview
+            ? `${preview.stats.valid_rows} cámaras · ${preview.stats.cluster_count} cluster(s)` +
+              (preview.stats.discarded_rows ? ` · ${preview.stats.discarded_rows} descartadas` : "")
+            : undefined
+        }
+        {...stepProps("cluster")}
+      >
+        <ClusterStep
+          params={props.params}
+          preview={preview}
+          canPreview={mappingReady && !isLoading}
+          isLoading={isLoading}
+          onParamsChange={props.onParamsChange}
+          onPreview={props.onPreview}
+        />
+      </Step>
+
+      <Step
+        number={3}
+        title="Puntos de partida"
+        icon={<IconPin />}
+        lockedHint="Primero agrupá las cámaras."
+        summary={preview ? `${assigned} de ${preview.clusters.length} cluster(s) con salida` : undefined}
+        {...stepProps("starts")}
+      >
+        {preview && (
+          <StartsStep
+            depots={props.depots}
+            preview={preview}
+            clusterStarts={clusterStarts}
+            onDepotsChange={props.onDepotsChange}
+            onClusterStartsChange={props.onClusterStartsChange}
+          />
+        )}
+      </Step>
+
+      <Step
+        number={4}
+        title="Reglas del día"
+        icon={<IconSliders />}
+        lockedHint={
+          missingStarts > 0 ? `Falta la salida de ${missingStarts} cluster(s).` : "Primero elegí las salidas."
+        }
+        summary={rulesSummary(routing)}
+        {...stepProps("rules")}
+      >
+        <RulesStep
+          routing={routing}
+          canOptimize={startsReady && !isLoading}
+          isLoading={isLoading}
+          hasResult={result !== null}
+          onRoutingChange={props.onRoutingChange}
+          onOptimize={props.onOptimize}
+        />
+      </Step>
+
+      <Step
+        number={5}
+        title="Plan y fechas"
+        icon={<IconCalendar />}
+        lockedHint="Calculá los recorridos para ver el plan."
+        isLast
+        {...stepProps("plan")}
+      >
+        {result && (
+          <PlanStep
+            result={result}
+            routeDates={props.routeDates}
+            planStart={props.planStart}
+            skipWeekends={props.skipWeekends}
+            selectedCluster={props.selectedCluster}
+            selectedDay={props.selectedDay}
+            isExporting={props.isExporting}
+            onPlanStartChange={props.onPlanStartChange}
+            onSkipWeekendsChange={props.onSkipWeekendsChange}
+            onRouteDateChange={props.onRouteDateChange}
+            onSelectRoute={props.onSelectRoute}
+            onExport={props.onExport}
+          />
+        )}
+      </Step>
+    </div>
+  );
+}
