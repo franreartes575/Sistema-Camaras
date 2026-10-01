@@ -2,15 +2,24 @@
 
 import pytest
 
+from app import config
 from app.export_route import export_rate_limit
 from app.main import app, _optimize_rate_limit, _process_rate_limit, _upload_rate_limit
+from app.registro_route import registro_rate_limit
 
 _LIMITADORES = (
     _upload_rate_limit,
     _process_rate_limit,
     _optimize_rate_limit,
     export_rate_limit,
+    registro_rate_limit,
 )
+
+
+@pytest.fixture(autouse=True)
+def _base_temporal(tmp_path, monkeypatch):
+    """Cada test escribe en su propia base SQLite, nunca en la de data/."""
+    monkeypatch.setattr(config, "DB_PATH", str(tmp_path / "registro.db"))
 
 
 @pytest.fixture(autouse=True)

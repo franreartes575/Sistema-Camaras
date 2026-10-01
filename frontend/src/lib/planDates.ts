@@ -79,3 +79,23 @@ export function assignRouteDates(
   }
   return dates;
 }
+
+/** `iso` corrido `days` días (negativo = hacia atrás). */
+export function shiftIso(iso: string, days: number): string {
+  const date = parseIso(iso);
+  date.setDate(date.getDate() + days);
+  return toIso(date);
+}
+
+/** Lunes de la semana de `iso`. */
+export function weekStartIso(iso: string): string {
+  const weekday = parseIso(iso).getDay(); // 0 = domingo
+  return shiftIso(iso, weekday === 0 ? -6 : 1 - weekday);
+}
+
+/** Primer y último día del mes de `iso`. */
+export function monthRangeIso(iso: string): { from: string; to: string } {
+  const date = parseIso(iso);
+  const last = new Date(date.getFullYear(), date.getMonth() + 1, 0);
+  return { from: toIso(new Date(date.getFullYear(), date.getMonth(), 1)), to: toIso(last) };
+}

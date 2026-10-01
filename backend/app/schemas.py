@@ -1,6 +1,7 @@
 """Modelos de respuesta de la API."""
 
 import datetime as dt
+from typing import Literal
 
 from pydantic import BaseModel, Field
 
@@ -220,3 +221,196 @@ class ExportRequest(BaseModel):
     """Plan completo a exportar: el backend no guarda estado, llega entero."""
 
     days: list[ExportDay] = Field(..., min_length=1, max_length=MAX_EXPORT_DAYS)
+    plan_id: int | None = Field(
+        None,
+        ge=1,
+        description=(
+            "Plan del registro al que corresponde. Va en una hoja oculta del "
+            "Excel para que, al cargar el seguimiento, se actualice ese plan."
+        ),
+    )
+
+
+# --------------------------------------------------------------------------
+# Registro de recorridos (/registro/...)
+# --------------------------------------------------------------------------
+
+# Una polilínea de OSRM para una jornada larga ronda los miles de puntos.
+MAX_GEOMETRY_POINTS = 50_000
+
+# Estado que informan los técnicos. "reprogramada" no se carga: se deriva
+# cuando la cámara vuelve a aparecer en un plan posterior.
+TaskStatus = Literal["pendiente", "realizada", "no_realizada", "reprogramada"]
+ReportedStatus = Literal["pendiente", "realizada", "no_realizada"]
+
+
+class RegistryStopIn(BaseModel):
+    """Una cámara de una jornada, tal como sale del planificador."""
+
+    camera_id: str = Field(..., min_length=1, max_length=200)
+    lat: float = Field(..., ge=-90, le=90)
+    lon: float = Field(..., ge=-180, le=180)
+    label: str | None = Field(None, max_length=500)
+    node: str | None = Field(None, max_length=200, description="Nodo preliminar")
+    observation: str | None = Field(None, max_length=2000)
+
+
+class RegistryRouteIn(BaseModel):
+    """Una jornada del plan con su fecha."""
+
+    date: dt.date
+    cluster_id: int
+    day: int = Field(..., ge=1)
+    start_name: str | None = Field(None, max_length=200)
+    start_lat: float = Field(..., ge=-90, le=90)
+    start_lon: float = Field(..., ge=-180, le=180)
+    distance_m: float = Field(..., ge=0)
+    duration_s: float = Field(..., ge=0)
+    has_unreachable_legs: bool = False
+    geometry: list[tuple[float, float]] = Field(
+        default_factory=list,
+        max_length=MAX_GEOMETRY_POINTS,
+        description="Polilínea como pares [lat, lon]",
+    )
+    stops: list[RegistryStopIn] = Field(
+        ..., min_length=1, max_length=MAX_STOPS_PER_EXPORT_DAY,
+        description="Cámaras en orden de visita",
+    )
+
+
+class RegistryPlanIn(BaseModel):
+    """Plan completo a guardar en el registro."""
+
+    name: str | None = Field(None, max_length=200)
+    source_file: str | None = Field(None, max_length=255)
+    provider: str | None = Field(None, max_length=20)
+    is_road_network: bool = False
+    routes: list[RegistryRouteIn] = Field(..., min_length=1, max_length=MAX_EXPORT_DAYS)
+
+
+class TaskCounts(BaseModel):
+    """Cuántas tareas hay en cada estado."""
+
+    total: int
+    done: int = Field(..., description="Realizadas")
+    pending: int = Field(..., description="Pendientes, sin novedad de los técnicos")
+    not_done: int = Field(..., description="Informadas como no realizadas")
+    rescheduled: int = Field(
+        ..., description="Pendientes que ya se volvieron a planificar en otro plan"
+    )
+
+
+class PlanSummary(TaskCounts):
+    """Un plan del registro con su avance."""
+
+    id: int
+    name: str
+    created_at: str
+    source_file: str | None
+    provider: str | None
+    is_road_network: bool
+    notes: str | None
+    route_count: int
+    date_from: dt.date | None
+    date_to: dt.date | None
+    distance_m: float
+    duration_s: float
+
+
+class PlanUpdate(BaseModel):
+    """Cambios editables de un plan."""
+
+    name: str | None = Field(None, min_length=1, max_length=200)
+    notes: str | None = Field(None, max_length=2000)
+
+
+class RouteSummary(TaskCounts):
+    """Una jornada del registro con su avance (sin polilínea)."""
+
+    id: int
+    plan_id: int
+    plan_name: str
+    date: dt.date
+    cluster_id: int
+    day: int
+    start_name: str | None
+    start_lat: float
+    start_lon: float
+    distance_m: float
+    duration_s: float
+    has_unreachable_legs: bool
+
+
+class Task(BaseModel):
+    """Una parada del registro: la tarea de visitar una cámara."""
+
+    id: int
+    route_id: int
+    plan_id: int
+    plan_name: str
+    date: dt.date
+    cluster_id: int
+    day: int
+    order: int = Field(..., description="Posición en el recorrido, base 1")
+    camera_id: str
+    lat: float
+    lon: float
+    label: str | None
+    node: str | None = Field(None, description="Nodo preliminar")
+    migrated_node: str | None = Field(None, description="Nodo al cual se migró")
+    observation: str | None
+    status: TaskStatus
+    verified_at: str | None
+
+
+class RouteDetail(RouteSummary):
+    """Una jornada completa: paradas y polilínea, para dibujarla en el mapa."""
+
+    geometry: list[tuple[float, float]]
+    stops: list[Task]
+
+
+class TaskUpdate(BaseModel):
+    """Corrección manual de una tarea desde el registro."""
+
+    status: ReportedStatus | None = None
+    observation: str | None = Field(None, max_length=2000)
+    migrated_node: str | None = Field(None, max_length=200)
+
+
+class FollowUpResult(BaseModel):
+    """Qué cambió en el registro al cargar un Excel de seguimiento."""
+
+    import_id: int
+    filename: str
+    plan_id: int | None
+    plan_name: str | None
+    rows: int = Field(..., description="Filas con ID de cámara en el archivo")
+    matched: int = Field(..., description="Filas que coinciden con una tarea guardada")
+    updated: int = Field(..., description="Tareas cuyo estado, nodo u observación cambió")
+    done: int
+    not_done: int
+    no_news: int = Field(..., description="Coinciden pero sin Realizado cargado")
+    unmatched: int
+    unmatched_ids: list[str] = Field(
+        ..., description="Algunas cámaras sin tarea guardada (hasta 20)"
+    )
+    previously_loaded_at: str | None = Field(
+        None, description="Si el mismo archivo ya se había cargado, cuándo"
+    )
+
+
+class FollowUpImport(BaseModel):
+    """Una carga de seguimiento del historial."""
+
+    id: int
+    filename: str
+    loaded_at: str
+    plan_id: int | None
+    plan_name: str | None
+    rows: int
+    matched: int
+    updated: int
+    done: int
+    not_done: int
+    unmatched: int

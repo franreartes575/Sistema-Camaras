@@ -22,6 +22,13 @@ htmlcov/
 *.xlsm
 *.xls
 
+# Base del registro de recorridos (datos de operación, no código)
+backend/data/
+*.db
+*.db-wal
+*.db-shm
+*.sqlite
+
 # Entorno
 .env
 .env.local

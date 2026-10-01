@@ -263,22 +263,26 @@ export type ExportDay = {
 };
 
 /** Nombre sugerido por el backend en Content-Disposition, si vino. */
-function filenameFrom(response: Response, fallback: string): string {
+export function filenameFrom(response: Response, fallback: string): string {
   const header = response.headers.get("Content-Disposition") ?? "";
   return /filename="([^"]+)"/.exec(header)?.[1] ?? fallback;
 }
 
 /**
  * Pide el Excel de seguimiento del plan. Devuelve el archivo y el nombre con
- * que conviene guardarlo; la descarga en sí la dispara quien llama.
+ * que conviene guardarlo; la descarga en sí la dispara quien llama
+ * (`downloadBlob` en lib/download.ts).
  */
 export async function exportPlan(
   days: ExportDay[],
+  planId: number | null = null,
 ): Promise<{ blob: Blob; filename: string }> {
   const response = await fetch(`${API_BASE_URL}/export/`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ days }),
+    // Con el plan del registro, el Excel lo lleva en una hoja oculta: al
+    // cargar el seguimiento se actualiza ese plan y no otro.
+    body: JSON.stringify({ days, plan_id: planId }),
   });
 
   if (!response.ok) {

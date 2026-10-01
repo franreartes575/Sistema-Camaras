@@ -36,3 +36,34 @@ export function formatDayLabel(iso: string): string {
   if (!year || !month || !day) return iso;
   return DAY_LABEL.format(new Date(year, month - 1, day)).replace(",", "");
 }
+
+const LONG_DAY = new Intl.DateTimeFormat("es-AR", {
+  weekday: "long",
+  day: "numeric",
+  month: "long",
+});
+
+/** "2026-10-01" → "01/10" (armado a mano: no depende del idioma del navegador). */
+export function formatShortDate(iso: string): string {
+  const [, month, day] = iso.split("-");
+  return month && day ? `${day.slice(0, 2)}/${month}` : iso;
+}
+
+/** "2026-10-01" → "Jueves, 1 de octubre" (sólo la primera letra en mayúscula). */
+export function formatLongDay(iso: string): string {
+  const [year, month, day] = iso.split("-").map(Number);
+  if (!year || !month || !day) return iso;
+  const text = LONG_DAY.format(new Date(year, month - 1, day));
+  return text.charAt(0).toUpperCase() + text.slice(1);
+}
+
+/** "2026-10-01 14:05:00" → "01/10 14:05" (marca de tiempo del backend). */
+export function formatTimestamp(stamp: string): string {
+  const [date, time = ""] = stamp.split(/[ T]/);
+  return `${formatShortDate(date)} ${time.slice(0, 5)}`.trim();
+}
+
+/** Porcentaje entero, sin dividir por cero. */
+export function percent(part: number, total: number): number {
+  return total > 0 ? Math.round((part / total) * 100) : 0;
+}

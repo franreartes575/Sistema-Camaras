@@ -26,6 +26,15 @@ import type {
   RouteParams,
   UploadExcelResponse,
 } from "@/lib/api";
+import type { FollowUpResult } from "@/lib/registro";
+
+/** Qué pasó con el registro al subir la planilla actual en el paso 1. */
+export type RegistroSync =
+  | { file: File; kind: "synced"; result: FollowUpResult }
+  | { file: File; kind: "error"; message: string }
+  | { file: File; kind: "from-registry" };
+
+export type RegistroStatus = "unsaved" | "saved" | "outdated";
 
 type Props = {
   upload: UploadExcelResponse | null;
@@ -58,6 +67,14 @@ type Props = {
   onSkipWeekendsChange: (skip: boolean) => void;
   onRouteDateChange: (key: string, iso: string) => void;
   onExport: () => void;
+  /** Si el plan actual ya está en el registro (y con estas fechas). */
+  registroStatus: RegistroStatus;
+  savedPlanName: string | null;
+  isSavingPlan: boolean;
+  registroNotice: { tone: "warn" | "error"; text: string } | null;
+  registroSync: RegistroSync | null;
+  onSaveToRegistry: () => void;
+  onOpenRegistry: () => void;
 };
 
 type StepId = "file" | "cluster" | "starts" | "rules" | "plan";
@@ -122,8 +139,10 @@ export default function ControlPanel(props: Props) {
           upload={upload}
           mapping={mapping}
           isLoading={isLoading && !upload}
+          registroSync={props.registroSync}
           onFile={props.onFile}
           onMappingChange={props.onMappingChange}
+          onOpenRegistry={props.onOpenRegistry}
         />
       </Step>
 
@@ -211,6 +230,12 @@ export default function ControlPanel(props: Props) {
             onRouteDateChange={props.onRouteDateChange}
             onSelectRoute={props.onSelectRoute}
             onExport={props.onExport}
+            registroStatus={props.registroStatus}
+            savedPlanName={props.savedPlanName}
+            isSavingPlan={props.isSavingPlan}
+            registroNotice={props.registroNotice}
+            onSaveToRegistry={props.onSaveToRegistry}
+            onOpenRegistry={props.onOpenRegistry}
           />
         )}
       </Step>

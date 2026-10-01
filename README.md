@@ -15,6 +15,7 @@ servicios pagos: ninguna coordenada de las cámaras sale del equipo.
 | Optimización | Google OR-Tools — un TSP por cluster |
 | Ruteo | OSRM local en Docker, grafo de Salta |
 | Planillas | pandas + openpyxl |
+| Registro | SQLite (viene con Python: sin servidor ni dependencias) |
 
 ## Cómo funciona
 
@@ -24,6 +25,48 @@ servicios pagos: ninguna coordenada de las cámaras sale del equipo.
 4. DBSCAN agrupa las cámaras por cercanía geográfica real.
 5. OR-Tools resuelve el orden de visita óptimo dentro de cada grupo.
 6. El mapa dibuja cada recorrido y numera las paradas.
+7. Exportás el Excel de seguimiento: el plan queda guardado en el **Registro**.
+8. Los técnicos completan *Realizado*, *Observación* y el nodo; al subir ese
+   Excel (en el paso 1 o en el Registro) se actualiza el avance de cada tarea.
+9. Desde el Registro, "Planificar los próximos recorridos" lleva lo que falta
+   de vuelta al paso 1.
+
+## Registro de recorridos
+
+Sección aparte (botón **Registro** arriba a la derecha) con todo lo planificado
+y lo que informaron los técnicos:
+
+- **Avance**: porcentaje realizado, tareas por estado y un gráfico de tareas
+  por día (tocar un día lo muestra en el mapa).
+- **Filtros**: período (todo, esta semana, este mes, próximos o un rango),
+  plan y búsqueda por cámara, nodo, salida u observación.
+- **Recorridos**: jornadas agrupadas por día, con su avance. Se marcan para
+  verlas en el mapa —una, varias o todas— y al tocar una se enfoca y despliega
+  sus paradas, donde se puede corregir el estado a mano.
+- **Tareas**: cada cámara con su estado; "Faltan" arma el próximo plan.
+- **Planes** (renombrar, filtrar, borrar) y **Cargas** (historial de
+  seguimientos subidos).
+- **Respaldo**: descarga la base completa como un archivo `.sqlite`.
+
+Cada tarea está **pendiente**, **realizada**, **no realizada** (el técnico
+puso "No") o **reprogramada** (quedó sin hacer y la cámara volvió a entrar en
+un plan posterior). En el mapa cada estado tiene un ícono propio además del
+color.
+
+La base es un único archivo, `backend/data/recorridos.db` (se cambia con la
+variable `DB_PATH`). Se crea sola al arrancar el backend, con el esquema de
+`backend/app/esquema.sql`, y se puede abrir con cualquier cliente SQLite (DB
+Browser for SQLite, DBeaver). Está ignorada por git: son datos de operación.
+
+Cómo se cruza un seguimiento con el registro:
+
+- El Excel exportado lleva el id del plan en una hoja oculta (`_registro`):
+  se actualiza ese plan y no otro con la misma cámara y fecha.
+- Cada fila se cruza por **cámara + fecha de planificación**; si la fecha no
+  coincide (el técnico la corrigió), con la tarea más reciente de esa cámara.
+- "Sí" marca realizada y "No", no realizada. **Una celda vacía no cambia
+  nada**: un seguimiento parcial no deshace lo ya informado.
+- Cargar dos veces el mismo archivo deja el registro igual (y lo avisa).
 
 ## Estructura
 
@@ -31,21 +74,28 @@ servicios pagos: ninguna coordenada de las cámaras sale del equipo.
 sistema-logistico-free/
 ├── backend/
 │   ├── app/
-│   │   ├── config.py             # OSRM, CORS, límites de subida
-│   │   ├── main.py               # Endpoints HTTP
+│   │   ├── config.py             # OSRM, CORS, límites de subida, DB_PATH
+│   │   ├── main.py               # Endpoints del planificador
+│   │   ├── registro_route.py     # Endpoints del registro (/registro/...)
+│   │   ├── database.py           # Conexión SQLite y aplicación del esquema
+│   │   ├── esquema.sql           # Tablas, índices y vistas del registro
 │   │   ├── schemas.py            # Modelos pydantic
 │   │   └── services/
 │   │       ├── ingest.py         # Lectura, mapeo y validación de planillas
 │   │       ├── clustering.py     # DBSCAN con métrica haversine
 │   │       ├── routing.py        # Proveedores de distancia (OSRM / línea recta)
-│   │       └── optimizer.py      # TSP por cluster con OR-Tools
-│   └── tests/                    # 90 tests, 96% de cobertura
+│   │       ├── optimizer.py      # TSP por cluster con OR-Tools
+│   │       ├── export.py         # Excel de seguimiento y de tareas
+│   │       └── registro.py       # Planes, avance y carga de seguimientos
+│   ├── data/                     # recorridos.db (se crea sola, ignorada por git)
+│   └── tests/                    # 257 tests, 97% de cobertura
 ├── frontend/src/
-│   ├── app/page.tsx              # Orquesta carga → mapeo → optimización
+│   ├── app/page.tsx              # Orquesta el planificador y la navegación
 │   ├── components/
 │   │   ├── MapView.tsx           # MapLibre: puntos, rótulos y polilíneas
-│   │   └── ControlPanel.tsx      # Mapeo, parámetros y lista de recorridos
-│   └── lib/{api,mapStyle,vizTokens}.ts
+│   │   ├── ControlPanel.tsx      # Los cinco pasos del planificador
+│   │   └── registro/             # Sección Registro: panel, resumen, mapa
+│   └── lib/{api,registro,mapStyle,vizTokens,statusIcons}.ts
 └── osrm/                         # Motor de ruteo — ver osrm/README.md
     ├── docker-compose.yml
     └── preparar.ps1
@@ -97,13 +147,29 @@ cd backend
 | `POST /upload-excel/` | Devuelve los encabezados y sugiere el mapeo de columnas |
 | `POST /process/` | Ingesta + validación + agrupamiento DBSCAN |
 | `POST /optimize/` | Todo lo anterior más el recorrido optimizado de cada cluster |
+| `POST /export/` | Excel de seguimiento del plan (con el id del registro, si se pasa) |
+
+### Registro
+
+| Endpoint | Qué hace |
+|---|---|
+| `GET/POST /registro/planes/` | Lista los planes con su avance / guarda uno nuevo |
+| `PUT/PATCH/DELETE /registro/planes/{id}` | Reemplaza (si no tiene seguimiento), renombra o borra |
+| `GET /registro/recorridos/` | Jornadas con su avance; filtros `desde`, `hasta`, `plan_id`, `q` |
+| `GET /registro/recorridos/detalle?ids=…` | Jornadas completas con paradas y polilínea |
+| `GET /registro/tareas/` | Tareas con su estado; `estado=faltan` = pendientes + no realizadas |
+| `GET /registro/tareas.xlsx` | Las mismas tareas como Excel reimportable en el planificador |
+| `PATCH /registro/tareas/{id}` | Corrige a mano estado, observación o nodo migrado |
+| `POST /registro/seguimiento/` | Carga un Excel de seguimiento completado |
+| `GET /registro/cargas/` | Historial de seguimientos cargados |
+| `GET /registro/respaldo` | La base completa como `.sqlite` |
 
 Las coordenadas pueden venir en dos columnas (`col_lat` + `col_lon`) o en una
 sola columna combinada (`col_coords` + `coord_order`).
 
-El archivo se reenvía en cada llamada en lugar de guardarse entre requests: el
-backend queda sin estado y reajustar un parámetro es simplemente volver a
-postear.
+El planificador no guarda estado: el archivo se reenvía en cada llamada y
+reajustar un parámetro es simplemente volver a postear. Lo único que se guarda
+es el registro, en su propia base y con sus propios endpoints.
 
 ## Notas de implementación
 
