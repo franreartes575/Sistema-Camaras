@@ -342,6 +342,28 @@ def test_no_reescala_si_hay_coordenadas_en_grados() -> None:
     assert discarded == [{"row": 2, "reason": "Coordenada fuera de rango válido"}]
 
 
+def test_reescala_solo_las_filas_en_microgrados_si_hay_algunas_en_grados() -> None:
+    """Corregir a mano unas filas en grados no debe invalidar el resto de la columna."""
+    frame = pd.DataFrame(
+        {
+            "id": ["A", "B", "C", "D", "E"],
+            "lat": [-24845092.0, -24.83101, -24828979.0, -24.832, -24844482.0],
+            "lon": [-65448486.0, -65.4313, -65419006.0, -65.41108, -65451293.0],
+        }
+    )
+
+    points, discarded = extract_points(frame, "id", "lat", "lon")
+
+    assert discarded == []
+    assert list(points["id"]) == ["A", "B", "C", "D", "E"]
+    assert points["lat"].tolist() == pytest.approx(
+        [-24.845092, -24.83101, -24.828979, -24.832, -24.844482]
+    )
+    assert points["lon"].tolist() == pytest.approx(
+        [-65.448486, -65.4313, -65.419006, -65.41108, -65.451293]
+    )
+
+
 def test_no_reescala_decimales_fuera_de_rango() -> None:
     """Sólo los enteros son una escala plausible; 999.5 es simplemente inválido."""
     frame = pd.DataFrame({"id": ["A"], "lat": [999.5], "lon": [-5800.25]})

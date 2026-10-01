@@ -171,24 +171,33 @@ def _rescale_integer_coords(
     """Reinterpreta coordenadas exportadas como enteros escalados.
 
     cnMaestro y varios GPS guardan microgrados sin punto decimal: -24845092 es
-    -24.845092. Sólo se reescala cuando *todos* los valores de ambas columnas
-    son enteros fuera de rango; un valor suelto fuera de rango entre grados
-    normales sigue siendo un error de carga. Se usa una única escala para las
-    dos columnas, la menor que las vuelve válidas: la longitud, que admite tres
-    dígitos enteros, desempata cuando la latitud sola sería ambigua.
+    -24.845092. Sólo se reescalan las filas fuera de rango, y sólo cuando son
+    la mayoría y todos sus valores son enteros: así una planilla donde alguien
+    corrigió a mano unas pocas filas en grados (-24.83101) conserva esas filas
+    tal cual, mientras que un valor suelto fuera de rango entre grados normales
+    sigue siendo un error de carga. Se usa una única escala para las dos
+    columnas, la menor que vuelve válidas a todas las filas reescaladas: la
+    longitud, que admite tres dígitos enteros, desempata cuando la latitud sola
+    sería ambigua.
     """
-    values = pd.concat([lat, lon]).dropna()
-    if values.empty or not (values == values.round()).all():
+    complete = lat.notna() & lon.notna()
+    out_of_range = complete & ((lat.abs() > 90) | (lon.abs() > 180))
+    if not out_of_range.any() or out_of_range.sum() * 2 <= complete.sum():
         return lat, lon
-    if (lat.dropna().abs() <= 90).any() or (lon.dropna().abs() <= 180).any():
+
+    scaled_lat, scaled_lon = lat[out_of_range], lon[out_of_range]
+    if not ((scaled_lat == scaled_lat.round()) & (scaled_lon == scaled_lon.round())).all():
         return lat, lon
 
     for exponent in range(1, _MAX_COORD_SCALE_EXPONENT + 1):
         factor = 10.0**exponent
-        if (lat.dropna().abs() / factor <= 90).all() and (
-            lon.dropna().abs() / factor <= 180
+        if (scaled_lat.abs() / factor <= 90).all() and (
+            scaled_lon.abs() / factor <= 180
         ).all():
-            return lat / factor, lon / factor
+            return (
+                lat.where(~out_of_range, lat / factor),
+                lon.where(~out_of_range, lon / factor),
+            )
     return lat, lon
 
 
