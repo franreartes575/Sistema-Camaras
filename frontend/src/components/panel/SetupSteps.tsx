@@ -8,6 +8,7 @@
 import DepotEditor from "@/components/DepotEditor";
 import CoordinateField from "@/components/ui/CoordinateField";
 import { BUTTON, Notice, Select, Slider } from "@/components/ui/controls";
+import IntegerField from "@/components/ui/IntegerField";
 import type {
   Cluster,
   ClusterParams,
@@ -189,7 +190,7 @@ export function StartsStep({
 
 // ---------------------------------------------------------------- Paso 4
 
-const MAX_STOPS_SLIDER = 30;
+const MAX_STOPS_PER_DAY = 100;
 
 /** Mínimo por día sin superar el tope: si lo supera, el tope sube con él. */
 function withMinStops(routing: RouteParams, min: number): RouteParams {
@@ -231,22 +232,18 @@ export function RulesStep({
         onChange={(hours) => onRoutingChange({ ...routing, day_budget_s: hours * 3600 })}
       />
       <div className="grid grid-cols-2 gap-3">
-        <Slider
+        <IntegerField
           label="Mín. cámaras/día"
           value={min}
-          display={min === 0 ? "—" : String(min)}
-          min={0}
-          max={MAX_STOPS_SLIDER}
-          step={1}
+          max={MAX_STOPS_PER_DAY}
+          emptyText="—"
           onChange={(value) => onRoutingChange(withMinStops(routing, value))}
         />
-        <Slider
+        <IntegerField
           label="Máx. cámaras/día"
           value={max}
-          display={max === 0 ? "sin tope" : String(max)}
-          min={0}
-          max={MAX_STOPS_SLIDER}
-          step={1}
+          max={MAX_STOPS_PER_DAY}
+          emptyText="sin tope"
           onChange={(value) => onRoutingChange(withMaxStops(routing, value))}
         />
       </div>
