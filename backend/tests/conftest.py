@@ -1,8 +1,13 @@
 """Fixtures compartidas por toda la suite."""
 
+import base64
+import datetime as dt
+
 import pytest
 
 from app import config
+from app.auth.dependencias import sesion_actual
+from app.auth.servicio import SesionActiva
 from app.export_route import export_rate_limit
 from app.main import app, _optimize_rate_limit, _process_rate_limit, _upload_rate_limit
 from app.registro_route import registro_rate_limit
@@ -16,10 +21,41 @@ _LIMITADORES = (
 )
 
 
+# Clave maestra fija para los tests (32 bytes). Nunca se usa fuera de acá.
+CLAVE_DE_PRUEBA = base64.b64encode(bytes(range(32))).decode()
+
+SESION_DE_PRUEBA = SesionActiva(
+    sesion_id="sesion-de-prueba",
+    usuario_id=1,
+    usuario="pruebas",
+    nombre="Pruebas",
+    rol="admin",
+    csrf="csrf-de-prueba",
+    debe_cambiar_password=False,
+    expira_inactividad=dt.datetime(2099, 1, 1, tzinfo=dt.timezone.utc),
+    expira_absoluta=dt.datetime(2099, 1, 1, tzinfo=dt.timezone.utc),
+)
+
+
 @pytest.fixture(autouse=True)
 def _base_temporal(tmp_path, monkeypatch):
-    """Cada test escribe en su propia base SQLite, nunca en la de data/."""
+    """Cada test escribe en sus propias bases SQLite, nunca en las de data/."""
     monkeypatch.setattr(config, "DB_PATH", str(tmp_path / "registro.db"))
+    monkeypatch.setattr(config, "AUTH_DB_PATH", str(tmp_path / "seguridad.db"))
+    monkeypatch.setattr(config, "AUTH_MASTER_KEY", CLAVE_DE_PRUEBA)
+
+
+@pytest.fixture(autouse=True)
+def _sesion_simulada(request):
+    """Los tests de la aplicación corren con una sesión de administrador ya
+    abierta: prueban planificación y registro, no el login. Los de
+    autenticación (marcados `auth_real`) pasan por el flujo completo."""
+    if request.node.get_closest_marker("auth_real"):
+        yield
+        return
+    app.dependency_overrides[sesion_actual] = lambda: SESION_DE_PRUEBA
+    yield
+    app.dependency_overrides.pop(sesion_actual, None)
 
 
 @pytest.fixture(autouse=True)

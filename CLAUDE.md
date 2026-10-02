@@ -11,7 +11,9 @@ español. Mantené ese idioma.
 
 ```powershell
 cd backend
-.\venv\Scripts\python.exe -m uvicorn app.main:app --reload --port 8000
+.\venv\Scripts\python.exe -m app.auth.cli inicializar        # una vez: clave maestra + base de seguridad
+.\venv\Scripts\python.exe -m app.auth.cli crear-usuario --usuario admin --nombre "Admin" --rol admin
+.\venv\Scripts\python.exe -m uvicorn app.main:app --reload --no-proxy-headers --port 8000
 
 .\venv\Scripts\python.exe -m pytest                              # suite completa + cobertura
 .\venv\Scripts\python.exe -m pytest tests/test_ingest.py          # un archivo
@@ -35,9 +37,15 @@ npm run lint
 No hay tests de frontend. `npm run build` es la única verificación automática;
 corrélo siempre después de tocar `.tsx`.
 
-La app tiene dos secciones, Planificar y Registro, que se eligen en el
+Todo pasa por `components/auth/AuthGate.tsx`: sin sesión no se monta nada de
+la aplicación, y al perderla (logout, inactividad, revocación) se desmonta
+entera. Dentro, dos secciones, Planificar y Registro, que se eligen en el
 encabezado (`app/page.tsx`); las dos quedan montadas y se ocultan con CSS, así
 que ir y volver no pierde el estado de ninguna.
+
+Toda llamada al backend pasa por `lib/http.ts` (`apiFetch`): va a `/api/...`
+en el mismo origen, agrega `X-CSRF-Token` en los métodos que modifican y avisa
+a AuthGate ante un 401. No uses `fetch` directo.
 
 El panel lateral es una secuencia de pasos (`components/ui/Step.tsx`):
 `ControlPanel.tsx` sólo decide estado y plegado de cada uno; el contenido está
@@ -107,6 +115,35 @@ Lo único con estado es el **registro** (`registro_route.py`, prefijo
 endpoints del planificador: el frontend guarda el plan llamando a
 `/registro/planes/` antes de `/export/`.
 
+### Autenticación (`app/auth/`)
+
+Modelo: sesiones opacas de servidor (no JWT, para poder revocarlas al
+instante), contraseña Argon2id + TOTP obligatorio, auditoría de sólo agregado.
+Todo endpoint que no sea `/auth/*` ni `/health` depende de `requiere_sesion`
+(`dependencias.py`); los de administración, de `requiere_admin`. Un endpoint
+nuevo tiene que llevarla: en `main.py` va en `dependencies=[...]`, y los
+routers se incluyen con `dependencies=[Depends(requiere_sesion)]`.
+
+- **Base separada** (`AUTH_DB_PATH`, `seguridad.db`) del registro: el respaldo
+  del registro no se lleva hashes ni la auditoría. Transacciones explícitas
+  (`db.transaccion`, `BEGIN IMMEDIATE`) porque la auditoría encadena cada fila
+  con la anterior.
+- **Los servicios devuelven el error, no lo lanzan, dentro de la
+  transacción**: un intento fallido tiene que quedar auditado y contado aunque
+  el pedido termine en 401. Las funciones públicas lo lanzan después del
+  COMMIT. Si agregás un flujo, respetá ese patrón (`_paso()` + `isinstance`).
+- **Argon2 fuera de la transacción**: tarda decenas de ms y no debe retener
+  el lock de escritura.
+- **Mensajes al cliente siempre genéricos** (`servicio.ErrorAuth.mensaje`); el
+  motivo real va a `auditoria.registrar(..., motivo=...)`. No agregues
+  mensajes que distingan usuario inexistente, contraseña incorrecta o bloqueo.
+- **Cookies**: se programan en `request.state` y las aplica
+  `SeguridadMiddleware` sobre la respuesta que sea (también las `Response`
+  directas de las descargas). `__Host-` exige `Secure` y `Path=/`.
+- **Reloj**: todo pasa por `reloj.ahora()` (UTC); los tests lo mueven.
+- **Clave maestra**: derivadas por propósito con HKDF (`cripto.subclave`). Sin
+  ella el backend no arranca (lifespan).
+
 `_ingest_and_cluster()` en `main.py` es el tramo compartido por `/process/` y
 `/optimize/`; toda lógica nueva de ingesta va ahí, no duplicada.
 
@@ -142,6 +179,10 @@ endpoints del planificador: el frontend guarda el plan llamando a
 - Los tests escriben en una base temporal por test (fixture autouse
   `_base_temporal` en `conftest.py`). El limitador del registro está en
   `_LIMITADORES`.
+- Los tests corren con una sesión de administrador simulada
+  (`_sesion_simulada` en `conftest.py`). Los de autenticación llevan
+  `pytestmark = pytest.mark.auth_real` y usan el flujo real; su cliente es
+  `https://testserver` (sin https, httpx no manda las cookies `Secure`).
 
 ### La capa de ruteo está abstraída a propósito
 
@@ -237,6 +278,33 @@ barras apiladas, lo pendiente va entre lo realizado y lo no realizado. La capa
 de íconos se monta recién después de `addStatusIcons` (en `onLoad`), así nunca
 pide una imagen que todavía no está registrada.
 
+### El rewrite `/api` de Next tiene dos trampas
+
+- `:path*` **descarta la barra final**: `/api/upload-excel/` llegaba como
+  `/upload-excel`, FastAPI redirigía (307) a `http://127.0.0.1:8000/...` y el
+  navegador recibía la dirección interna. Por eso hay dos reglas en
+  `next.config.ts` (la de la barra primero) y `redirect_slashes=False` en la
+  app: una ruta mal escrita da 404, nunca un Location interno.
+- **No agrega `X-Forwarded-For`** y reenvía el que mande el cliente. Sin un
+  proxy delante, todos los pedidos llegan como 127.0.0.1; con Next expuesto a
+  la red, la IP sería falsificable. Por eso Next escucha sólo en 127.0.0.1
+  (`-H 127.0.0.1` en los scripts) y en producción va detrás de un proxy TLS
+  que reescribe la cabecera (`deploy/`).
+
+uvicorn, por su lado, reescribe la IP del cliente desde `X-Forwarded-For`
+cuando el par es 127.0.0.1 (`--proxy-headers`, activo por defecto): la
+auditoría perdería la IP de conexión. Corrélo con `--no-proxy-headers`; la IP
+la resuelve `red.py` según `TRUSTED_PROXIES`.
+
+### La CSP lleva nonce, y eso obliga a renderizar por pedido
+
+`src/proxy.ts` genera un nonce por pedido y Next lo aplica a sus scripts. Una
+página estática no puede llevarlo: `layout.tsx` llama a `connection()`. Si
+agregás un dominio externo (tiles, fuentes), sumalo a la CSP del proxy o el
+navegador lo bloquea en silencio (queda sólo un error en la consola). El
+matcher excluye `/api`: si el proxy corriera ahí, Next retendría en memoria
+los cuerpos de las subidas (tope de 10 MB por defecto).
+
 ### Avisos de plausibilidad
 
 `bounding_span_km()` mide cuánto abarcan los puntos válidos. Si supera
@@ -258,9 +326,13 @@ recorridos quedarían de un píxel.
   esta versión de Next.js difiere de lo que el modelo tiene memorizado. Ante una
   duda de API, consultá `node_modules/next/dist/docs/`.
 - **`frontend/.env.local`** (si existe) redirige el backend a otro puerto vía
-  `NEXT_PUBLIC_API_BASE_URL`. Se creó porque el 8000 quedó retenido por un
-  socket huérfano; se libera al reiniciar Windows, y ahí conviene borrar el
-  archivo.
+  `NEXT_PUBLIC_API_BASE_URL` (o `BACKEND_URL`, el nombre nuevo). Ahora lo lee
+  sólo el rewrite de `next.config.ts`: el navegador siempre llama a `/api`. Se
+  creó porque el 8000 quedó retenido por un socket huérfano; se libera al
+  reiniciar Windows, y ahí conviene borrar el archivo.
+- `backend/data/seguridad.db` (usuarios, sesiones, auditoría) y
+  `backend/data/clave_maestra.key`. **Perder la clave deja inservibles los
+  segundos factores y la verificación de la auditoría**: respaldala aparte.
 - `osrm/data/` pesa cientos de MB y está ignorado por git: se reconstruye con
   `preparar.ps1`.
 - `backend/data/recorridos.db` es la base del registro (más sus `-wal` y
@@ -271,10 +343,9 @@ recorridos quedarían de un píxel.
   `.then` de la promesa o en un timer), y un `useMemo` cuyo cálculo muta
   objetos falla con `preserve-manual-memoization`.
 
-## Antes de exponerlo a la red
+## Despliegue
 
-Hoy corre en `localhost` sin autenticación, lo cual es razonable para una
-herramienta interna. Publicarlo exige resolver primero: autenticación y rate
-limiting en `/optimize/` (corre OR-Tools hasta 30 s por cluster), sanitizar los
-mensajes de error —hoy incluyen la URL interna de OSRM— y fijar las versiones de
-`requirements.txt`.
+Fuera de `localhost` va detrás de un proxy HTTPS (`deploy/Caddyfile` o
+`deploy/nginx.conf`): sin TLS el navegador descarta las cookies `Secure` y nadie
+puede entrar. Ver "Despliegue en red" en el README para lo que no se puede
+omitir (reescribir `X-Forwarded-For`, `ALLOWED_ORIGINS`, la clave maestra).

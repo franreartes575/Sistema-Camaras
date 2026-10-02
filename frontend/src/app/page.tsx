@@ -3,10 +3,11 @@
 import dynamic from "next/dynamic";
 import { useCallback, useMemo, useState } from "react";
 
+import AuthGate, { useAuth } from "@/components/auth/AuthGate";
 import ControlPanel, { type RegistroSync } from "@/components/ControlPanel";
 import { loadDepots } from "@/components/DepotEditor";
 import RegistroView from "@/components/registro/RegistroView";
-import { IconCalendar, IconDatabase, IconList, IconMap, IconRoute } from "@/components/ui/icons";
+import { IconCalendar, IconDatabase, IconList, IconLogout, IconMap, IconRoute } from "@/components/ui/icons";
 import {
   exportPlan,
   optimize,
@@ -126,7 +127,44 @@ function toRegistryPlan(
   };
 }
 
+/** Quién está conectado y el botón para salir. */
+function UserMenu() {
+  const { session, logout } = useAuth();
+  const { nombre, rol } = session.usuario;
+  return (
+    <div className="flex items-center gap-2">
+      <span className="hidden text-right leading-tight lg:block">
+        <span className="block text-xs font-medium text-slate-200">{nombre}</span>
+        <span className="block text-[10px] uppercase tracking-wide text-slate-500">{rol}</span>
+      </span>
+      <button
+        type="button"
+        onClick={logout}
+        title="Cerrar sesión"
+        aria-label="Cerrar sesión"
+        className="inline-flex items-center gap-1.5 rounded-lg border border-slate-800 px-2.5 py-1.5 text-xs font-medium text-slate-300 transition hover:border-slate-600 hover:text-white"
+      >
+        <IconLogout className="h-3.5 w-3.5" />
+        <span className="hidden sm:inline">Salir</span>
+      </button>
+    </div>
+  );
+}
+
+/**
+ * La página exige sesión: sin ella no se monta nada de la aplicación (ver
+ * AuthGate). Todo el estado de la operación vive dentro de `Aplicacion` y se
+ * descarta al cerrar la sesión.
+ */
 export default function Home() {
+  return (
+    <AuthGate>
+      <Aplicacion />
+    </AuthGate>
+  );
+}
+
+function Aplicacion() {
   const [file, setFile] = useState<File | null>(null);
   const [upload, setUpload] = useState<UploadExcelResponse | null>(null);
   const [mapping, setMapping] = useState<ColumnMapping>(EMPTY_MAPPING);
@@ -424,8 +462,9 @@ export default function Home() {
 
   return (
     <main className="flex h-dvh flex-col bg-slate-950 text-slate-100">
-      <header className="flex items-center justify-between gap-3 border-b border-slate-800 bg-slate-950 px-4 py-2.5 md:px-5">
-        <div className="flex min-w-0 items-center gap-2.5">
+      <header className="flex items-center justify-between gap-2 border-b border-slate-800 bg-slate-950 px-4 py-2.5 sm:gap-3 md:px-5">
+        {/* En el celular no entra junto a las secciones, la vista y Salir. */}
+        <div className="hidden min-w-0 items-center gap-2.5 sm:flex">
           <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-sky-500/15 text-sky-300 ring-1 ring-sky-400/30">
             <IconRoute className="h-4 w-4" />
           </span>
@@ -446,7 +485,7 @@ export default function Home() {
               type="button"
               onClick={() => openSection(id)}
               aria-current={section === id ? "page" : undefined}
-              className={`inline-flex items-center gap-1.5 rounded-md px-3 py-1.5 text-xs font-semibold transition ${
+              className={`inline-flex items-center gap-1.5 rounded-md px-2.5 py-1.5 text-xs font-semibold transition sm:px-3 ${
                 section === id ? "bg-sky-500 text-slate-950 shadow-sm" : "text-slate-400 hover:text-slate-100"
               }`}
             >
@@ -462,6 +501,7 @@ export default function Home() {
             <IconMap className="h-3.5 w-3.5" /> <span className="sr-only sm:not-sr-only">Mapa</span>
           </button>
         </nav>
+        <UserMenu />
       </header>
 
       <div className={`${section === "plan" ? "flex" : "hidden"} min-h-0 flex-1`}>

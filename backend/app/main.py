@@ -14,11 +14,14 @@ import anyio
 import numpy as np
 
 from fastapi import Depends, FastAPI, File, Form, HTTPException, UploadFile
-from fastapi.middleware.cors import CORSMiddleware
 
+from .auth import cripto
+from .auth import db as auth_db
+from .auth.dependencias import instalar as instalar_seguridad
+from .auth.dependencias import requiere_sesion
+from .auth.rutas import router as auth_router
 from .config import (
-    API_KEY,
-    CORS_ORIGINS,
+    API_DOCS,
     RATE_LIMIT_OPTIMIZE_MAX,
     RATE_LIMIT_PROCESS_MAX,
     RATE_LIMIT_UPLOAD_MAX,
@@ -78,39 +81,35 @@ _optimize_rate_limit = rate_limiter(RATE_LIMIT_OPTIMIZE_MAX)
 
 @asynccontextmanager
 async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
-    """Deja constancia en el log si el servicio arranca sin API_KEY.
-
-    El chequeo queda deshabilitado por defecto para no pedir configuración
-    extra en desarrollo local, pero exponerlo así a la red pasaría
-    desapercibido sin este aviso.
-    """
-    if not API_KEY:
-        logger.warning(
-            "API_KEY no está configurada: los endpoints de escritura no "
-            "exigen autenticación. No exponer así a la red."
-        )
+    """No arranca sin clave maestra: sin ella no hay segundo factor ni
+    auditoría verificable, y seguir sería fallar abierto."""
+    cripto.clave_maestra()  # levanta ClaveMaestraFaltante con instrucciones
+    auth_db.connect().close()  # crea la base de seguridad si no existe
     yield
 
 
 app = FastAPI(
     title="Sistema Logístico Free",
     description="Optimización de rutas de mantenimiento de cámaras sobre stack libre.",
-    version="0.2.0",
+    version="0.3.0",
     lifespan=_lifespan,
+    # La documentación expone toda la superficie de la API: sólo con API_DOCS=1.
+    docs_url="/docs" if API_DOCS else None,
+    redoc_url=None,
+    openapi_url="/openapi.json" if API_DOCS else None,
+    # Sin redirecciones automáticas por la barra final: el Location llevaría
+    # la dirección interna del backend (http://127.0.0.1:8000/...) al
+    # navegador, que además no la puede seguir.
+    redirect_slashes=False,
 )
 
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=CORS_ORIGINS,
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-    # El frontend lee el nombre sugerido del Excel exportado.
-    expose_headers=["Content-Disposition"],
-)
-
-app.include_router(export_router)
-app.include_router(registro_router)
+# Sin CORS: el navegador llega por el rewrite /api del frontend (mismo origen),
+# así que ningún otro sitio necesita permiso para leer las respuestas.
+instalar_seguridad(app)
+app.include_router(auth_router)
+# Todo lo que no es /auth ni /health exige una sesión con segundo factor.
+app.include_router(export_router, dependencies=[Depends(requiere_sesion)])
+app.include_router(registro_router, dependencies=[Depends(requiere_sesion)])
 
 
 @app.get("/health")
@@ -126,7 +125,7 @@ def health() -> dict[str, str]:
 @app.post(
     "/upload-excel/",
     response_model=UploadExcelResponse,
-    dependencies=[Depends(_upload_rate_limit), Depends(require_api_key)],
+    dependencies=[Depends(_upload_rate_limit), Depends(require_api_key), Depends(requiere_sesion)],
 )
 async def upload_excel(file: UploadFile = File(...)) -> UploadExcelResponse:
     """Recibe una planilla y devuelve los encabezados de su primera fila.
@@ -335,7 +334,7 @@ async def _ingest_and_cluster(
 @app.post(
     "/process/",
     response_model=ProcessResponse,
-    dependencies=[Depends(_process_rate_limit), Depends(require_api_key)],
+    dependencies=[Depends(_process_rate_limit), Depends(require_api_key), Depends(requiere_sesion)],
 )
 async def process(
     file: UploadFile = File(...),
@@ -650,7 +649,7 @@ def _unserved_warning(unserved: list[Camera]) -> str:
 @app.post(
     "/optimize/",
     response_model=OptimizeResponse,
-    dependencies=[Depends(_optimize_rate_limit), Depends(require_api_key)],
+    dependencies=[Depends(_optimize_rate_limit), Depends(require_api_key), Depends(requiere_sesion)],
 )
 async def optimize(
     file: UploadFile = File(...),

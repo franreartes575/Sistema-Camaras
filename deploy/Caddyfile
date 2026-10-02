@@ -1,0 +1,39 @@
+# Proxy TLS delante del sistema (recomendado: certificados automáticos).
+#
+#   caddy run --config deploy/Caddyfile
+#
+# Reemplazá camaras.ejemplo.gob.ar por el nombre real. Para una red interna
+# sin salida a internet, usá `tls internal` (CA propia de Caddy) o tus
+# certificados: `tls /ruta/cert.pem /ruta/clave.pem`.
+#
+# Por qué es obligatorio:
+#   - Las cookies de sesión son Secure: fuera de localhost, sin HTTPS el
+#     navegador no las guarda y nadie puede ingresar.
+#   - Caddy reescribe X-Forwarded-For con la IP real del cliente (no confía en
+#     la que manda el cliente): es la IP que queda en la auditoría y la que
+#     cuenta para el límite de intentos.
+#
+# El backend y el frontend escuchan sólo en 127.0.0.1: desde la red se llega
+# únicamente por acá.
+
+camaras.ejemplo.gob.ar {
+	encode zstd gzip
+
+	header {
+		Strict-Transport-Security "max-age=63072000; includeSubDomains"
+		-Server
+	}
+
+	# La API va directo al backend (sin pasar por Next). handle_path quita el
+	# prefijo /api y conserva la barra final de las rutas de FastAPI.
+	handle_path /api/* {
+		request_body {
+			max_size 33MB
+		}
+		reverse_proxy 127.0.0.1:8000
+	}
+
+	handle {
+		reverse_proxy 127.0.0.1:3000
+	}
+}

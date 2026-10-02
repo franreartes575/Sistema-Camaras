@@ -1,7 +1,6 @@
-/** Cliente del backend FastAPI. */
+/** Cliente del backend FastAPI (planificador). Las llamadas pasan por lib/http. */
 
-export const API_BASE_URL =
-  process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://127.0.0.1:8000";
+import { apiError, apiFetch, apiJson, jsonBody } from "@/lib/http";
 
 export type CoordMode = "split" | "single";
 export type CoordOrder = "auto" | "latlon" | "lonlat";
@@ -163,15 +162,8 @@ export type RouteParams = {
   min_stops_per_day: number;
 };
 
-async function post<T>(path: string, body: FormData): Promise<T> {
-  const response = await fetch(`${API_BASE_URL}${path}`, { method: "POST", body });
-
-  if (!response.ok) {
-    const payload = await response.json().catch(() => null);
-    throw new Error(payload?.detail ?? `Error ${response.status}`);
-  }
-
-  return response.json();
+function post<T>(path: string, body: FormData): Promise<T> {
+  return apiJson<T>(path, { method: "POST", body }, "Error del servidor");
 }
 
 /** Sube una planilla y devuelve los encabezados detectados. */
@@ -277,21 +269,10 @@ export async function exportPlan(
   days: ExportDay[],
   planId: number | null = null,
 ): Promise<{ blob: Blob; filename: string }> {
-  const response = await fetch(`${API_BASE_URL}/export/`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    // Con el plan del registro, el Excel lo lleva en una hoja oculta: al
-    // cargar el seguimiento se actualiza ese plan y no otro.
-    body: JSON.stringify({ days, plan_id: planId }),
-  });
-
-  if (!response.ok) {
-    const payload = await response.json().catch(() => null);
-    const detail = payload?.detail;
-    throw new Error(
-      typeof detail === "string" ? detail : `No se pudo exportar (error ${response.status})`,
-    );
-  }
+  // Con el plan del registro, el Excel lo lleva en una hoja oculta: al
+  // cargar el seguimiento se actualiza ese plan y no otro.
+  const response = await apiFetch("/export/", jsonBody("POST", { days, plan_id: planId }));
+  if (!response.ok) throw await apiError(response, "No se pudo exportar");
 
   return { blob: await response.blob(), filename: filenameFrom(response, "plan-recorridos.xlsx") };
 }
