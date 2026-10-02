@@ -97,6 +97,10 @@ app = FastAPI(
     docs_url="/docs" if API_DOCS else None,
     redoc_url=None,
     openapi_url="/openapi.json" if API_DOCS else None,
+    # Sin redirecciones automáticas por la barra final: el Location llevaría
+    # la dirección interna del backend (http://127.0.0.1:8000/...) al
+    # navegador, que además no la puede seguir.
+    redirect_slashes=False,
 )
 
 # Sin CORS: el navegador llega por el rewrite /api del frontend (mismo origen),

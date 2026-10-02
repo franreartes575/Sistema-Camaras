@@ -1027,3 +1027,11 @@ def test_auditoria_filtrada_por_fecha(ahora) -> None:
 
     assert [f["evento"] for f in recientes] == ["login_fallido"]
     assert "login_fallido" not in {f["evento"] for f in viejos}
+
+
+def test_sin_redireccion_que_filtre_la_direccion_interna(ahora) -> None:
+    """Sin la barra final no hay 307 hacia http://127.0.0.1:8000/...: 404 seco."""
+    respuesta = cliente().post("/upload-excel", follow_redirects=False)
+
+    assert respuesta.status_code == 404
+    assert "location" not in respuesta.headers

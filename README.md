@@ -16,6 +16,7 @@ servicios pagos: ninguna coordenada de las cámaras sale del equipo.
 | Ruteo | OSRM local en Docker, grafo de Salta |
 | Planillas | pandas + openpyxl |
 | Registro | SQLite (viene con Python: sin servidor ni dependencias) |
+| Acceso | Argon2id + TOTP (RFC 6238), sesiones de servidor, auditoría encadenada con HMAC |
 
 ## Cómo funciona
 
@@ -77,6 +78,8 @@ sistema-logistico-free/
 │   │   ├── config.py             # OSRM, CORS, límites de subida, DB_PATH
 │   │   ├── main.py               # Endpoints del planificador
 │   │   ├── registro_route.py     # Endpoints del registro (/registro/...)
+│   │   ├── red.py                # IP real del cliente detrás de proxies
+│   │   ├── auth/                 # Login, segundo factor, sesiones, auditoría y CLI
 │   │   ├── database.py           # Conexión SQLite y aplicación del esquema
 │   │   ├── esquema.sql           # Tablas, índices y vistas del registro
 │   │   ├── schemas.py            # Modelos pydantic
@@ -87,15 +90,17 @@ sistema-logistico-free/
 │   │       ├── optimizer.py      # TSP por cluster con OR-Tools
 │   │       ├── export.py         # Excel de seguimiento y de tareas
 │   │       └── registro.py       # Planes, avance y carga de seguimientos
-│   ├── data/                     # recorridos.db (se crea sola, ignorada por git)
-│   └── tests/                    # 257 tests, 97% de cobertura
+│   ├── data/                     # recorridos.db, seguridad.db y la clave maestra (ignorada por git)
+│   └── tests/                    # 367 tests, 98% de cobertura
 ├── frontend/src/
 │   ├── app/page.tsx              # Orquesta el planificador y la navegación
 │   ├── components/
 │   │   ├── MapView.tsx           # MapLibre: puntos, rótulos y polilíneas
 │   │   ├── ControlPanel.tsx      # Los cinco pasos del planificador
+│   │   ├── auth/                 # Puerta de acceso, login, segundo factor, inactividad
 │   │   └── registro/             # Sección Registro: panel, resumen, mapa
 │   └── lib/{api,registro,mapStyle,vizTokens,statusIcons}.ts
+├── deploy/                       # Proxy HTTPS: Caddyfile y nginx.conf
 └── osrm/                         # Motor de ruteo — ver osrm/README.md
     ├── docker-compose.yml
     └── preparar.ps1
@@ -103,14 +108,36 @@ sistema-logistico-free/
 
 ## Cómo correrlo
 
+### Primera vez: clave maestra y usuarios
+
+Todo el sistema exige iniciar sesión. Antes del primer arranque:
+
+```powershell
+cd backend
+.\venv\Scripts\python.exe -m pip install -r requirements.txt
+.\venv\Scripts\python.exe -m app.auth.cli inicializar
+.\venv\Scripts\python.exe -m app.auth.cli crear-usuario --usuario admin --nombre "Administración" --rol admin
+```
+
+`inicializar` crea la clave maestra en `backend/data/clave_maestra.key`.
+**Respaldala aparte** (fuera del equipo y separada de las bases): sin ella no
+se pueden verificar los segundos factores ni la auditoría. Sin clave el backend
+no arranca.
+
+Cada usuario configura su app autenticadora (Google Authenticator, Microsoft
+Authenticator, Aegis…) en su primer ingreso; la contraseña que le pone el
+administrador es provisoria y la tiene que cambiar al entrar.
+
 ### Backend
 
 ```powershell
 cd backend
-.\venv\Scripts\python.exe -m uvicorn app.main:app --reload --port 8000
+.\venv\Scripts\python.exe -m uvicorn app.main:app --reload --no-proxy-headers --port 8000
 ```
 
-Documentación interactiva en <http://127.0.0.1:8000/docs>
+`--no-proxy-headers` deja que la IP real del cliente la resuelva el sistema
+(ver [Seguridad](#seguridad-y-acceso)) en vez de uvicorn. La documentación
+interactiva (`/docs`) está apagada; para desarrollo: `$env:API_DOCS=1`.
 
 ### Frontend
 
@@ -119,7 +146,9 @@ cd frontend
 npm run dev
 ```
 
-Aplicación en <http://localhost:3000>
+Aplicación en <http://localhost:3000>. El navegador habla sólo con el
+frontend: `/api/*` se reenvía al backend (variable `BACKEND_URL`, por defecto
+`http://127.0.0.1:8000`).
 
 ### Motor de ruteo
 
@@ -139,6 +168,93 @@ cd backend
 .\venv\Scripts\python.exe -m pytest
 ```
 
+## Seguridad y acceso
+
+El sistema maneja infraestructura de cámaras de seguridad: todo, salvo
+`/health`, exige una sesión con segundo factor.
+
+**Ingreso en dos pasos.** Usuario y contraseña (Argon2id); después, el código
+de 6 dígitos de la app autenticadora o un código de recuperación de un solo
+uso. La cookie de sesión recién se emite al pasar el segundo factor; entre un
+paso y otro hay una pre-autenticación de 5 minutos y 5 intentos, atada al
+navegador. WebAuthn/FIDO2 (llaves de seguridad) tiene la estructura lista en la
+base (tabla `factores_mfa`, tipo `webauthn`) pero no está implementado.
+
+**Sin enumeración de usuarios.** Usuario inexistente, contraseña incorrecta,
+cuenta bloqueada o deshabilitada: siempre "Credenciales inválidas.", con el
+mismo tiempo de respuesta (se verifica contra un hash señuelo). El motivo real
+queda sólo en la auditoría.
+
+**Bloqueos y límites.** 5 fallos seguidos bloquean la cuenta 15 minutos; cada
+bloqueo siguiente dura el doble, y al cuarto queda bloqueada hasta que la
+desbloquee un administrador. Además, por ventana de 15 minutos: 20 fallos por
+IP y 10 por nombre de usuario (exista o no). Los límites se cuentan en la
+auditoría, así que sobreviven a un reinicio. Un código del segundo factor
+incorrecto también cuenta.
+
+**Sesiones.** Token opaco de 256 bits en una cookie `__Host-sid` `HttpOnly`,
+`Secure` y `SameSite=Strict`; en el servidor sólo se guarda su hash. Se cierra
+tras 15 minutos sin actividad y, pase lo que pase, a las 8 horas. El token se
+rota cada 5 minutos; usar uno viejo fuera de una gracia de 30 s revoca la
+sesión entera (indica una cookie robada). Una cookie usada desde otro navegador
+también la revoca. Máximo 3 sesiones simultáneas por usuario. El frontend avisa
+un minuto antes del cierre por inactividad y, al cerrar, desmonta la aplicación
+entera: no quedan datos en memoria. Nada sensible va a `localStorage`.
+
+**CSRF y XSS.** Token anti-CSRF por sesión en `X-CSRF-Token` más chequeo de
+`Origin` en todo pedido que modifica. Content-Security-Policy con nonce por
+pedido (`script-src 'nonce-…' 'strict-dynamic'`): un script inyectado no corre.
+Entradas validadas con esquemas estrictos (pydantic `strict`, sin campos de
+más) y consultas SQL siempre parametrizadas.
+
+**Auditoría** (`backend/data/seguridad.db`, tabla `auditoria_accesos`). Cada
+intento de ingreso —exitoso o fallido—, cada segundo factor, cierre,
+revocación y acción administrativa, con hora UTC en microsegundos, IP real del
+cliente (resuelta detrás de proxies de confianza), IP de conexión,
+`X-Forwarded-For` crudo, navegador y usuario intentado. Es de sólo agregado
+(triggers) y cada fila está encadenada con un HMAC de la anterior: borrar o
+editar una fila se detecta con `verificar-auditoria`.
+
+**Administración** (desde la consola del servidor, nunca por la web):
+
+```powershell
+.\venv\Scripts\python.exe -m app.auth.cli listar-usuarios
+.\venv\Scripts\python.exe -m app.auth.cli desbloquear --usuario jperez
+.\venv\Scripts\python.exe -m app.auth.cli resetear-mfa --usuario jperez        # perdió el teléfono
+.\venv\Scripts\python.exe -m app.auth.cli resetear-password --usuario jperez   # provisoria
+.\venv\Scripts\python.exe -m app.auth.cli deshabilitar --usuario jperez        # y habilitar
+.\venv\Scripts\python.exe -m app.auth.cli revocar-sesiones --usuario jperez    # cierra ya mismo
+.\venv\Scripts\python.exe -m app.auth.cli verificar-auditoria
+.\venv\Scripts\python.exe -m app.auth.cli exportar-auditoria --salida accesos.csv --desde 2026-10-01 --hasta 2026-10-31
+```
+
+Los administradores también ven la auditoría en `GET /api/auth/auditoria` y
+son los únicos que pueden descargar el respaldo del registro.
+
+### Despliegue en red
+
+Fuera de `localhost` el sistema **tiene que** ir detrás de un proxy HTTPS: las
+cookies son `Secure` y, sin TLS, el navegador no las guarda. En
+[`deploy/`](deploy/) hay una configuración lista para
+[Caddy](deploy/Caddyfile) (certificados automáticos) y otra para
+[nginx](deploy/nginx.conf). Lo que no se puede omitir:
+
+- El proxy **reescribe** `X-Forwarded-For` con la IP real del cliente; nunca
+  agrega a lo que mandó el cliente. El backend sólo cree ese header si viene de
+  `TRUSTED_PROXIES` (por defecto, loopback).
+- Backend y frontend escuchan sólo en `127.0.0.1` (`npm run start` y uvicorn ya
+  lo hacen): desde la red se llega únicamente por el proxy.
+- `ALLOWED_ORIGINS=https://el-dominio-real` en el backend.
+- La clave maestra por variable de entorno (`AUTH_MASTER_KEY`) desde un gestor
+  de secretos, o el archivo con permisos sólo para la cuenta del servicio (en
+  Windows, ajustá la ACL del archivo: el código no puede hacerlo).
+- Exportar la auditoría periódicamente a un almacenamiento externo de sólo
+  escritura: la cadena de HMAC detecta alteraciones, pero quien tenga la clave
+  maestra y la base podría rehacerla.
+
+Toda la configuración (tiempos, umbrales, orígenes) está documentada en
+`backend/app/config.py` y se ajusta por variables de entorno.
+
 ## API
 
 | Endpoint | Qué hace |
@@ -148,6 +264,22 @@ cd backend
 | `POST /process/` | Ingesta + validación + agrupamiento DBSCAN |
 | `POST /optimize/` | Todo lo anterior más el recorrido optimizado de cada cluster |
 | `POST /export/` | Excel de seguimiento del plan (con el id del registro, si se pasa) |
+
+Todas exigen sesión. Desde el navegador se llaman como `/api/...`.
+
+### Autenticación
+
+| Endpoint | Qué hace |
+|---|---|
+| `POST /auth/login` | Usuario y contraseña; abre el desafío del segundo factor |
+| `POST /auth/mfa/totp/enrolar` | Primer ingreso: secreto y QR para la app autenticadora |
+| `POST /auth/mfa/totp/confirmar` | Confirma el primer código; devuelve los códigos de recuperación y abre la sesión |
+| `POST /auth/mfa/verificar` | Código de la app o de recuperación; abre la sesión |
+| `GET /auth/sesion` | Usuario, token CSRF y vencimientos (cuenta como actividad) |
+| `POST /auth/logout` | Cierra la sesión en el servidor |
+| `GET /auth/sesiones` · `DELETE /auth/sesiones/{id}` · `POST /auth/sesiones/cerrar-otras` | Sesiones propias |
+| `POST /auth/password` | Cambia la contraseña y cierra las demás sesiones |
+| `GET /auth/auditoria` | Eventos de acceso (sólo administradores) |
 
 ### Registro
 
@@ -212,13 +344,13 @@ columnas de texto usan un dtype `str` dedicado, así que comparar contra
 `object` para detectarlas ya no funciona; y `astype(str)` sobre esa columna
 conserva los `NaN` como float en lugar de convertirlos a la cadena `"nan"`.
 
-## Antes de exponerlo a la red
+## Pendientes de seguridad
 
-Hoy el sistema corre en `localhost` y no tiene autenticación, lo cual es
-razonable para una herramienta interna de escritorio. Si en algún momento se
-publica en red, hay que resolver primero:
-
-- Autenticación y rate limiting en `/optimize/`, que corre OR-Tools hasta 30 s
-  por cluster y es un blanco fácil de saturación.
-- Sanitizar los mensajes de error: hoy incluyen la URL interna de OSRM.
-- Fijar las versiones en `requirements.txt` y auditar con `pip-audit`.
+- WebAuthn/FIDO2: la base ya tiene las columnas; falta el flujo
+  (`py_webauthn` en el backend, `navigator.credentials` en el frontend).
+- Chequear contraseñas contra listas de filtradas: hoy sólo hay una lista
+  corta local (el sistema no sale a internet).
+- Varias réplicas del backend: SQLite y el limitador en memoria asumen un único
+  proceso; para escalar hace falta una base compartida.
+- Auditar las dependencias con `pip-audit` y `npm audit` antes de cada
+  despliegue.

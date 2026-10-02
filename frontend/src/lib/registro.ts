@@ -5,7 +5,8 @@
  * jornadas, el estado de cada tarea y el historial de seguimientos cargados.
  */
 
-import { API_BASE_URL, filenameFrom } from "@/lib/api";
+import { filenameFrom } from "@/lib/api";
+import { ApiError, apiError, apiFetch, apiJson, jsonBody } from "@/lib/http";
 
 export type TaskStatus = "pendiente" | "realizada" | "no_realizada" | "reprogramada";
 /** Lo que se puede informar a mano: "reprogramada" se deriva sola. */
@@ -153,46 +154,14 @@ export type RegistryFilters = {
 const DETAIL_CHUNK = 100;
 
 /** Error del registro con el código HTTP, para distinguir 404/409 de una caída. */
-export class RegistryError extends Error {
-  constructor(
-    message: string,
-    readonly status: number,
-  ) {
-    super(message);
-  }
-}
+export { ApiError as RegistryError };
 
-async function failure(response: Response, fallback: string): Promise<RegistryError> {
-  const payload = await response.json().catch(() => null);
-  const detail = payload?.detail;
-  return new RegistryError(
-    typeof detail === "string" ? detail : `${fallback} (error ${response.status})`,
-    response.status,
-  );
-}
-
-/** fetch con un mensaje entendible cuando el backend no está levantado. */
-async function call(path: string, init?: RequestInit): Promise<Response> {
-  try {
-    return await fetch(`${API_BASE_URL}${path}`, init);
-  } catch (err) {
-    if (err instanceof DOMException && err.name === "AbortError") throw err;
-    throw new Error("No se pudo conectar con el backend. Verificá que esté corriendo.");
-  }
-}
-
-async function request<T>(path: string, init?: RequestInit): Promise<T> {
-  const response = await call(path, init);
-  if (!response.ok) throw await failure(response, "Error del registro");
-  return (response.status === 204 ? undefined : await response.json()) as T;
+function request<T>(path: string, init?: RequestInit): Promise<T> {
+  return apiJson<T>(path, init, "Error del registro");
 }
 
 function sendJson<T>(path: string, method: string, body: unknown): Promise<T> {
-  return request<T>(path, {
-    method,
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(body),
-  });
+  return request<T>(path, jsonBody(method, body));
 }
 
 /** Query string con los filtros y, opcionalmente, los estados de tarea. */
@@ -269,8 +238,8 @@ export async function fetchRouteDetails(ids: number[], signal?: AbortSignal): Pr
 }
 
 async function download(path: string, fallbackName: string): Promise<{ blob: Blob; filename: string }> {
-  const response = await call(path);
-  if (!response.ok) throw await failure(response, "No se pudo descargar");
+  const response = await apiFetch(path);
+  if (!response.ok) throw await apiError(response, "No se pudo descargar");
   return { blob: await response.blob(), filename: filenameFrom(response, fallbackName) };
 }
 
