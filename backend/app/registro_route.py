@@ -12,6 +12,7 @@ from typing import Annotated, Literal
 import anyio
 from fastapi import APIRouter, Depends, File, HTTPException, Query, Response, UploadFile
 
+from .auth.dependencias import requiere_admin
 from .config import RATE_LIMIT_REGISTRO_MAX
 from .database import get_db
 from .schemas import (
@@ -210,9 +211,9 @@ def list_imports(conn: Db) -> list[FollowUpImport]:
     return registro.list_imports(conn)
 
 
-@router.get("/respaldo", response_class=Response)
+@router.get("/respaldo", response_class=Response, dependencies=[Depends(requiere_admin)])
 def backup(conn: Db) -> Response:
-    """Descarga la base completa (.sqlite) para guardarla como respaldo."""
+    """Descarga la base completa (.sqlite) para guardarla como respaldo (sólo administradores)."""
     return Response(
         content=registro.backup(conn),
         media_type="application/vnd.sqlite3",

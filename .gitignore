@@ -22,8 +22,9 @@ htmlcov/
 *.xlsm
 *.xls
 
-# Base del registro de recorridos (datos de operación, no código)
+# Bases del registro y de seguridad, y la clave maestra (datos de operación, no código)
 backend/data/
+*.key
 *.db
 *.db-wal
 *.db-shm

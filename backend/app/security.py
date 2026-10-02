@@ -13,6 +13,7 @@ from typing import Callable
 from fastapi import Header, HTTPException, Request
 
 from . import config
+from .red import client_ip
 
 # Tope de IPs distintas rastreadas por limitador. Sin esto, un proceso
 # expuesto a la red acumula una entrada por cada IP de origen que le llegue,
@@ -65,22 +66,6 @@ class SlidingWindowLimiter:
                 self._hits.popitem(last=False)
 
 
-def _client_ip(request: Request) -> str:
-    """IP de origen para el rate limiting.
-
-    Detrás de un reverse proxy, `request.client.host` es la IP del proxy, no
-    la del cliente real: todo el tráfico colapsaría en un único cupo
-    compartido. Con `TRUST_PROXY_HEADERS` se usa `X-Forwarded-For` en su
-    lugar; queda deshabilitado por defecto porque ese header no es confiable
-    salvo que el proxy inmediato lo controle.
-    """
-    if config.TRUST_PROXY_HEADERS:
-        forwarded = request.headers.get("x-forwarded-for")
-        if forwarded:
-            return forwarded.split(",")[0].strip()
-    return request.client.host if request.client else "desconocido"
-
-
 def rate_limiter(max_requests: int, window_s: float | None = None) -> Callable:
     """Fábrica de dependencias de FastAPI: una instancia de limitador por endpoint.
 
@@ -93,6 +78,6 @@ def rate_limiter(max_requests: int, window_s: float | None = None) -> Callable:
     )
 
     async def _dependency(request: Request) -> None:
-        limiter.check(_client_ip(request))
+        limiter.check(client_ip(request))
 
     return _dependency
