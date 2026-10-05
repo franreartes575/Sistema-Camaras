@@ -52,7 +52,8 @@ type HoverInfo = {
   stop: number | null;
 };
 
-type StopRef = { day: number; order: number };
+/** `cluster` es el de la ruta: con clusters juntos en una jornada, el de la cámara no sirve para filtrar. */
+type StopRef = { day: number; order: number; cluster: number };
 type LatLon = { lat: number; lon: number };
 
 const POINTS_LAYER = "camaras-punto";
@@ -86,7 +87,7 @@ export default function MapView({
     const map = new Map<string, StopRef>();
     for (const route of routes) {
       for (const stop of route.stops) {
-        map.set(stop.camera_id, { day: route.vehicle_day, order: stop.order });
+        map.set(stop.camera_id, { day: route.vehicle_day, order: stop.order, cluster: route.cluster_id });
       }
     }
     return map;
@@ -103,7 +104,7 @@ export default function MapView({
           properties: {
             id: camera.id,
             label: camera.label ?? "",
-            cluster: camera.cluster,
+            cluster: stop?.cluster ?? camera.cluster,
             day: stop?.day ?? -1,
             reassigned: camera.reassigned,
             stop: stop?.order ?? -1,
@@ -228,10 +229,10 @@ export default function MapView({
       return;
     }
     fitTo(
-      cameras.filter((camera) => camera.cluster === selectedCluster),
+      cameras.filter((camera) => (stopByCamera.get(camera.id)?.cluster ?? camera.cluster) === selectedCluster),
       16,
     );
-  }, [selectedCluster, selectedDay, routes, cameras, fitTo]);
+  }, [selectedCluster, selectedDay, routes, cameras, stopByCamera, fitTo]);
 
   const handleClick = useCallback(
     (event: { features?: { properties?: Record<string, unknown> }[] }) => {

@@ -81,7 +81,7 @@ _optimize_rate_limit = rate_limiter(RATE_LIMIT_OPTIMIZE_MAX)
 
 @asynccontextmanager
 async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
-    """No arranca sin clave maestra: sin ella no hay segundo factor ni
+    """No arranca sin clave maestra: sin ella no hay
     auditoría verificable, y seguir sería fallar abierto."""
     cripto.clave_maestra()  # levanta ClaveMaestraFaltante con instrucciones
     auth_db.connect().close()  # crea la base de seguridad si no existe
@@ -107,7 +107,7 @@ app = FastAPI(
 # así que ningún otro sitio necesita permiso para leer las respuestas.
 instalar_seguridad(app)
 app.include_router(auth_router)
-# Todo lo que no es /auth ni /health exige una sesión con segundo factor.
+# Todo lo que no es /auth ni /health exige una sesión iniciada.
 app.include_router(export_router, dependencies=[Depends(requiere_sesion)])
 app.include_router(registro_router, dependencies=[Depends(requiere_sesion)])
 
@@ -485,8 +485,12 @@ def _route_for_cluster(
     start: ClusterStart,
     provider: RoutingProvider,
     rules: DayRules,
+    cluster_ids: list[int] | None = None,
 ) -> ClusterPlan:
     """Arma uno o más recorridos (vehículo-jornada) para un cluster.
+
+    `members` puede juntar cámaras de varios clusters con la misma sede
+    (`cluster_ids`): cada jornada las reparte sin importar de cuál vienen.
 
     `members[0]` nunca es el punto de partida: se antepone acá y
     `build_day_routes` lo mantiene fuera de `stops` porque no es una cámara.
@@ -539,6 +543,7 @@ def _route_for_cluster(
                 geometry=[
                     [lat, lon] for lat, lon in provider.route_geometry(ordered_points)
                 ],
+                cluster_ids=cluster_ids or [cluster_id],
                 vehicle_day=day_index,
                 vehicle_day_count=total_days,
                 start_name=start.name,
@@ -558,14 +563,35 @@ class Solved(NamedTuple):
     warning: str | None
 
 
+def _group_clusters_by_start(
+    cluster_ids: list[int],
+    cluster_starts: dict[int, ClusterStart],
+    merge: bool,
+) -> list[list[int]]:
+    """Agrupa los clusters que pueden compartir jornada.
+
+    Un vehículo sale y vuelve a una sola sede, así que sólo comparten día los
+    clusters con las mismas coordenadas de partida. Sin `merge`, cada cluster
+    va por separado. Conserva el orden de los ids.
+    """
+    if not merge:
+        return [[cluster_id] for cluster_id in cluster_ids]
+    groups: dict[tuple[float, float], list[int]] = {}
+    for cluster_id in cluster_ids:
+        start = cluster_starts[cluster_id]
+        groups.setdefault((round(start.lat, 6), round(start.lon, 6)), []).append(cluster_id)
+    return list(groups.values())
+
+
 def _solve_routes(
     result: Clustered,
     preference: str,
     average_speed_kmh: float,
     cluster_starts: dict[int, ClusterStart],
     rules: DayRules,
+    merge_clusters: bool = False,
 ) -> Solved:
-    """Elige el motor y resuelve cada cluster con presupuesto de jornada.
+    """Elige el motor y resuelve cada grupo de clusters con presupuesto de jornada.
 
     Es síncrona a propósito: consultar OSRM y correr OR-Tools bloquea, así que
     el endpoint la despacha a un hilo en vez de frenar el event loop.
@@ -575,14 +601,15 @@ def _solve_routes(
     routes: list[ClusterRoute] = []
     out_of_reach: list[Camera] = []
     left_out: list[Camera] = []
-    for cluster in result.clusters:
-        members = [
-            camera for camera in result.cameras if camera.cluster == cluster.id
-        ]
+    groups = _group_clusters_by_start(
+        [cluster.id for cluster in result.clusters], cluster_starts, merge_clusters
+    )
+    for group in groups:
+        members = [camera for camera in result.cameras if camera.cluster in group]
         if not members:
             continue
         plan = _route_for_cluster(
-            cluster.id, members, cluster_starts[cluster.id], engine, rules
+            group[0], members, cluster_starts[group[0]], engine, rules, cluster_ids=group
         )
         routes.extend(plan.routes)
         out_of_reach.extend(plan.out_of_reach)
@@ -673,6 +700,7 @@ async def optimize(
     time_limit_s: int = Form(5, ge=1, le=60),
     max_stops_per_day: int = Form(0, ge=0, le=100),
     min_stops_per_day: int = Form(0, ge=0, le=100),
+    merge_clusters: bool = Form(False),
 ) -> OptimizeResponse:
     """Agrupa las cámaras y resuelve el orden de visita de cada cluster.
 
@@ -687,6 +715,8 @@ async def optimize(
     las que quedan más allá de ese radio no entran en ningún recorrido.
     `min_stops_per_day` / `max_stops_per_day` acotan las cámaras por jornada
     (0 = sin límite); el mínimo lo cumplen todas las jornadas salvo una.
+    Con `merge_clusters`, los clusters que comparten punto de partida se
+    reparten juntos: una jornada puede mezclar cámaras de varios de ellos.
     """
     if max_stops_per_day and min_stops_per_day > max_stops_per_day:
         raise HTTPException(
@@ -734,6 +764,7 @@ async def optimize(
             average_speed_kmh,
             cluster_starts,
             rules,
+            merge_clusters,
         )
     except ClusterTooLargeError as exc:
         # Es un problema del input, no del servicio: reintentar no lo arregla.

@@ -131,9 +131,13 @@ class RouteStop(BaseModel):
 
 
 class ClusterRoute(BaseModel):
-    """Recorrido resuelto para un cluster."""
+    """Recorrido resuelto para un cluster, o para varios con la misma sede."""
 
-    cluster_id: int
+    cluster_id: int = Field(..., description="El menor id de los clusters de la jornada")
+    cluster_ids: list[int] = Field(
+        default_factory=list,
+        description="Clusters cuyas cámaras reparte esta jornada (comparten sede)",
+    )
     stop_count: int
     total_distance_m: float
     total_duration_s: float = Field(
@@ -151,10 +155,10 @@ class ClusterRoute(BaseModel):
         ..., description="Polilínea del recorrido como pares [lat, lon]"
     )
     vehicle_day: int = Field(
-        ..., description="Número de jornada/vehículo dentro del cluster, base 1"
+        ..., description="Número de jornada/vehículo dentro de su grupo de clusters, base 1"
     )
     vehicle_day_count: int = Field(
-        ..., description="Cuántas jornadas en total le tocaron a este cluster"
+        ..., description="Cuántas jornadas en total le tocaron a ese grupo de clusters"
     )
     start_name: str | None = Field(
         None, description="Nombre del punto de partida, si se le puso uno"

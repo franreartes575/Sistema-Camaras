@@ -87,9 +87,9 @@ el poligono exacto, un tramo que cruza a Jujuy cortaria el recorrido.
 
     oeste -68.8 · sur -26.6 · este -62.0 · norte -21.7
 
-**`--max-table-size 100`.** Es el tope de coordenadas por matriz de distancias,
+**`--max-table-size 1000`.** Es el tope de coordenadas por matriz de distancias,
 y coincide con `OSRM_MAX_TABLE_SIZE` en `backend/app/services/routing.py`. Si
-necesitas clusters de mas de 100 camaras hay que subir **los dos** valores;
+necesitas clusters de mas de 1000 camaras hay que subir **los dos** valores;
 tener en cuenta que el costo de la matriz crece al cuadrado.
 
 **MLD y no CH.** MLD (`partition` + `customize`) es el algoritmo recomendado

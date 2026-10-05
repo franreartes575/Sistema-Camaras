@@ -76,7 +76,10 @@ export type RouteStop = {
 };
 
 export type ClusterRoute = {
+  /** El menor id de los clusters de la jornada. */
   cluster_id: number;
+  /** Clusters cuyas cámaras reparte esta jornada (comparten sede). */
+  cluster_ids: number[];
   stop_count: number;
   total_distance_m: number;
   /** Manejo real más tiempo de servicio en cada parada. */
@@ -86,7 +89,7 @@ export type ClusterRoute = {
   stops: RouteStop[];
   /** Polilinea del recorrido, como pares [lat, lon]. */
   geometry: [number, number][];
-  /** Número de jornada/vehículo dentro del cluster, base 1. */
+  /** Número de jornada en todo el plan (de corrido entre clusters), base 1. */
   vehicle_day: number;
   /** Cuántas jornadas en total le tocaron a este cluster. */
   vehicle_day_count: number;
@@ -160,6 +163,8 @@ export type RouteParams = {
    * jornadas salvo una (el "resto" cuando no se reparten justo).
    */
   min_stops_per_day: number;
+  /** Si es true, los clusters con la misma sede pueden compartir una jornada. */
+  merge_clusters: boolean;
 };
 
 function post<T>(path: string, body: FormData): Promise<T> {
@@ -216,7 +221,7 @@ export function previewClusters(
  * El archivo se reenvia en cada llamada: el backend no guarda estado, asi que
  * reajustar los parametros es simplemente volver a postear.
  */
-export function optimize(
+export async function optimize(
   file: File,
   mapping: ColumnMapping,
   params: ClusterParams,
@@ -232,7 +237,15 @@ export function optimize(
   body.append("time_limit_s", String(routing.time_limit_s));
   body.append("max_stops_per_day", String(routing.max_stops_per_day));
   body.append("min_stops_per_day", String(routing.min_stops_per_day));
-  return post<OptimizeResponse>("/optimize/", body);
+  body.append("merge_clusters", String(routing.merge_clusters));
+  const response = await post<OptimizeResponse>("/optimize/", body);
+  // El backend numera las jornadas dentro de cada cluster, así que cada
+  // cluster chico quedaba como "Día 1". Se sigue el orden del plan (que es el
+  // de las fechas): una cuadrilla, una jornada por día.
+  return {
+    ...response,
+    routes: response.routes.map((route, index) => ({ ...route, vehicle_day: index + 1 })),
+  };
 }
 
 export type ExportStop = {

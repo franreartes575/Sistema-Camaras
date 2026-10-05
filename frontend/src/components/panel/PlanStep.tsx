@@ -212,7 +212,7 @@ export default function PlanStep({
   if (result.routes.length === 0) {
     return <Notice tone="warn">No se pudo armar ningún recorrido con estas reglas.</Notice>;
   }
-  const clusterCount = new Set(result.routes.map((route) => route.cluster_id)).size;
+  const clusterCount = new Set(result.routes.flatMap((route) => route.cluster_ids)).size;
 
   return (
     <>
