@@ -314,3 +314,46 @@ def test_tope_mayor_que_el_cluster_no_divide() -> None:
     )
 
     assert len(plan.routes) == 1
+
+
+def test_zona_lejana_sobre_la_misma_ruta_se_hace_en_un_solo_viaje() -> None:
+    """Dos grupos de cámaras lejanas, uno camino al otro, van juntos en una jornada.
+
+    Con tope y mínimo de 6 por día y seis cámaras cerca de la sede, la salida
+    eficiente es un solo viaje largo con las seis del norte (en vez de dos
+    viajes largos con tres del norte y tres cercanas cada uno).
+    """
+    cerca = [(-22.50 + i * 0.004, -63.80 + (i % 2) * 0.004) for i in range(6)]
+    norte = [(-22.05 + i * 0.004, -63.70) for i in range(3)] + [
+        (-22.25 + i * 0.004, -63.73) for i in range(3)
+    ]
+    points = [(-22.50, -63.80), *cerca, *norte]
+
+    plan = build_day_routes(
+        points,
+        HaversineProvider(average_speed_kmh=60),
+        day_budget_s=DAY_BUDGET_8H,
+        service_time_s=SERVICE_10MIN,
+        time_limit_s=2,
+        max_stops_per_day=6,
+        min_stops_per_day=6,
+    )
+
+    indices_norte = set(range(7, 13))
+    viajes_al_norte = [
+        route for route in plan.routes if indices_norte & {stop.index for stop in route.stops}
+    ]
+    assert len(plan.routes) == 2
+    assert len(viajes_al_norte) == 1
+    assert plan.unserved == ()
+
+
+def test_el_reparto_en_jornadas_arranca_de_la_solucion_por_ahorros() -> None:
+    """Fija la estrategia inicial elegida con datos reales (ver el comentario en vrp.py)."""
+    from ortools.constraint_solver import routing_enums_pb2
+
+    from app.services import vrp
+
+    assert (
+        vrp.FIRST_SOLUTION_STRATEGY == routing_enums_pb2.FirstSolutionStrategy.SAVINGS
+    )

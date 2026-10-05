@@ -56,16 +56,17 @@ def _to_int_matrix(matrix: np.ndarray) -> list[list[int]]:
     return finite.round().astype(np.int64).tolist()
 
 
-def default_search_parameters(time_limit_s: int):
+def default_search_parameters(
+    time_limit_s: int,
+    first_solution_strategy: int = routing_enums_pb2.FirstSolutionStrategy.PATH_CHEAPEST_ARC,
+):
     """Estrategia de búsqueda: solución inicial golosa y luego mejora local.
 
     Pública porque `vrp.py` la reutiliza para el modelo multi-vehículo: es
-    la misma estrategia de búsqueda, sólo cambia el modelo al que se aplica.
+    la misma búsqueda local, sólo cambian el modelo y la solución inicial.
     """
     parameters = pywrapcp.DefaultRoutingSearchParameters()
-    parameters.first_solution_strategy = (
-        routing_enums_pb2.FirstSolutionStrategy.PATH_CHEAPEST_ARC
-    )
+    parameters.first_solution_strategy = first_solution_strategy
     parameters.local_search_metaheuristic = (
         routing_enums_pb2.LocalSearchMetaheuristic.GUIDED_LOCAL_SEARCH
     )
