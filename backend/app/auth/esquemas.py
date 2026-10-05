@@ -7,10 +7,8 @@ acotados y formatos con patrón. Un pedido inválido no llega al servicio.
 """
 
 import datetime as dt
-import re
-from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field
 
 
 class _Entrada(BaseModel):
@@ -24,43 +22,9 @@ class LoginIn(_Entrada):
     password: str = Field(min_length=1, max_length=256)
 
 
-class CodigoTotpIn(_Entrada):
-    codigo: str = Field(pattern=r"^\d{6}$")
-
-
-class VerificarMfaIn(_Entrada):
-    codigo: str | None = Field(None, pattern=r"^\d{6}$")
-    codigo_recuperacion: str | None = Field(None, min_length=12, max_length=20)
-
-    @field_validator("codigo_recuperacion")
-    @classmethod
-    def _formato_recuperacion(cls, valor: str | None) -> str | None:
-        if valor is not None and not re.fullmatch(r"[A-Za-z0-9]{12}", re.sub(r"[\s-]", "", valor)):
-            raise ValueError("formato inválido")
-        return valor
-
-    @model_validator(mode="after")
-    def _uno_solo(self) -> "VerificarMfaIn":
-        if (self.codigo is None) == (self.codigo_recuperacion is None):
-            raise ValueError("Indicá el código de la app o uno de recuperación, no ambos.")
-        return self
-
-
 class CambioPasswordIn(_Entrada):
     password_actual: str = Field(min_length=1, max_length=256)
     password_nueva: str = Field(min_length=1, max_length=256)
-
-
-class PasoLoginOut(BaseModel):
-    paso: Literal["mfa", "enrolar_mfa"]
-    csrf: str
-    expira_en: dt.datetime
-
-
-class EnrolamientoOut(BaseModel):
-    secreto: str = Field(..., description="Para cargarlo a mano si no se puede escanear")
-    uri: str
-    qr: str = Field(..., description="data:image/svg+xml — mostrar con <img>, nunca como HTML")
 
 
 class UsuarioOut(BaseModel):
@@ -76,12 +40,6 @@ class SesionOut(BaseModel):
     expira_inactividad_en: dt.datetime
     expira_absoluta_en: dt.datetime
     inactividad_minutos: int
-    codigos_recuperacion: list[str] | None = Field(
-        None, description="Sólo al enrolar el segundo factor: se muestran una vez"
-    )
-    codigos_restantes: int | None = Field(
-        None, description="Si se entró con un código de recuperación, cuántos quedan"
-    )
 
 
 class SesionListadaOut(BaseModel):
@@ -91,7 +49,6 @@ class SesionListadaOut(BaseModel):
     ip_inicio: str
     ip_ultima: str
     user_agent: str
-    metodo_mfa: str
     actual: bool
 
 

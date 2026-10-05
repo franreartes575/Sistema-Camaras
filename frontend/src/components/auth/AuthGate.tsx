@@ -24,24 +24,14 @@ import {
   type ReactNode,
 } from "react";
 
-import {
-  AuthShell,
-  ChangePasswordForm,
-  EnrollForm,
-  LoginForm,
-  MfaForm,
-  RecoveryCodes,
-} from "@/components/auth/AuthScreens";
+import { AuthShell, ChangePasswordForm, LoginForm } from "@/components/auth/AuthScreens";
 import { BUTTON, Notice } from "@/components/ui/controls";
-import { fetchSession, logout as logoutRequest, type LoginStep, type Session } from "@/lib/auth";
+import { fetchSession, logout as logoutRequest, type Session } from "@/lib/auth";
 import { onSessionLost } from "@/lib/http";
 
 type State =
   | { kind: "checking" }
   | { kind: "login"; notice: string | null }
-  | { kind: "mfa" }
-  | { kind: "enroll" }
-  | { kind: "recovery"; session: Session; codes: string[] }
   | { kind: "password"; session: Session }
   | { kind: "ready"; session: Session };
 
@@ -70,9 +60,6 @@ const NOTICES = {
 /** Estado inicial según la sesión del servidor. */
 function stateFor(session: Session | null, notice: string | null = null): State {
   if (!session) return { kind: "login", notice };
-  if (session.codigos_recuperacion?.length) {
-    return { kind: "recovery", session, codes: session.codigos_recuperacion };
-  }
   if (session.debe_cambiar_password) return { kind: "password", session };
   return { kind: "ready", session };
 }
@@ -172,7 +159,6 @@ export default function AuthGate({ children }: { children: ReactNode }) {
   }, []);
 
   const logout = useCallback(() => end(NOTICES.logout), [end]);
-  const restart = useCallback(() => setState({ kind: "login", notice: null }), []);
   const onSession = useCallback((session: Session) => setState(stateFor(session)), []);
   const refresh = useCallback(
     (session: Session) => setState((prev) => (prev.kind === "ready" ? { kind: "ready", session } : prev)),
@@ -196,23 +182,7 @@ export default function AuthGate({ children }: { children: ReactNode }) {
         </AuthShell>
       );
     case "login":
-      return (
-        <LoginForm
-          notice={state.notice}
-          onStep={(step: LoginStep) => setState({ kind: step.paso === "mfa" ? "mfa" : "enroll" })}
-        />
-      );
-    case "mfa":
-      return <MfaForm onSession={onSession} onRestart={restart} />;
-    case "enroll":
-      return <EnrollForm onSession={onSession} onRestart={restart} />;
-    case "recovery":
-      return (
-        <RecoveryCodes
-          codes={state.codes}
-          onContinue={() => setState(stateFor({ ...state.session, codigos_recuperacion: null }))}
-        />
-      );
+      return <LoginForm notice={state.notice} onSession={onSession} />;
     case "password":
       return (
         <ChangePasswordForm
@@ -224,14 +194,6 @@ export default function AuthGate({ children }: { children: ReactNode }) {
     case "ready":
       return (
         <AuthContext.Provider value={{ session: state.session, logout }}>
-          {state.session.codigos_restantes !== null && (
-            <div className="fixed inset-x-0 top-14 z-50 flex justify-center px-4">
-              <Notice tone="warn">
-                Entraste con un código de recuperación: te quedan {state.session.codigos_restantes}. Si
-                perdiste el teléfono, pedile a un administrador que restablezca tu segundo factor.
-              </Notice>
-            </div>
-          )}
           {children}
           <IdleWatcher session={state.session} onExpire={end} onSession={refresh} />
         </AuthContext.Provider>

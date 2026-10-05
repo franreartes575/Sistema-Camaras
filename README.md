@@ -16,7 +16,7 @@ servicios pagos: ninguna coordenada de las cámaras sale del equipo.
 | Ruteo | OSRM local en Docker, grafo de Salta |
 | Planillas | pandas + openpyxl |
 | Registro | SQLite (viene con Python: sin servidor ni dependencias) |
-| Acceso | Argon2id + TOTP (RFC 6238), sesiones de servidor, auditoría encadenada con HMAC |
+| Acceso | Argon2id, sesiones de servidor, auditoría encadenada con HMAC |
 
 ## Cómo funciona
 
@@ -79,7 +79,7 @@ sistema-logistico-free/
 │   │   ├── main.py               # Endpoints del planificador
 │   │   ├── registro_route.py     # Endpoints del registro (/registro/...)
 │   │   ├── red.py                # IP real del cliente detrás de proxies
-│   │   ├── auth/                 # Login, segundo factor, sesiones, auditoría y CLI
+│   │   ├── auth/                 # Login, sesiones, auditoría y CLI
 │   │   ├── database.py           # Conexión SQLite y aplicación del esquema
 │   │   ├── esquema.sql           # Tablas, índices y vistas del registro
 │   │   ├── schemas.py            # Modelos pydantic
@@ -97,7 +97,7 @@ sistema-logistico-free/
 │   ├── components/
 │   │   ├── MapView.tsx           # MapLibre: puntos, rótulos y polilíneas
 │   │   ├── ControlPanel.tsx      # Los cinco pasos del planificador
-│   │   ├── auth/                 # Puerta de acceso, login, segundo factor, inactividad
+│   │   ├── auth/                 # Puerta de acceso, login, inactividad
 │   │   └── registro/             # Sección Registro: panel, resumen, mapa
 │   └── lib/{api,registro,mapStyle,vizTokens,statusIcons}.ts
 ├── deploy/                       # Proxy HTTPS: Caddyfile y nginx.conf
@@ -121,12 +121,10 @@ cd backend
 
 `inicializar` crea la clave maestra en `backend/data/clave_maestra.key`.
 **Respaldala aparte** (fuera del equipo y separada de las bases): sin ella no
-se pueden verificar los segundos factores ni la auditoría. Sin clave el backend
-no arranca.
+se puede verificar la auditoría. Sin clave el backend no arranca.
 
-Cada usuario configura su app autenticadora (Google Authenticator, Microsoft
-Authenticator, Aegis…) en su primer ingreso; la contraseña que le pone el
-administrador es provisoria y la tiene que cambiar al entrar.
+La contraseña que le pone el administrador a cada usuario es provisoria y la
+tiene que cambiar al entrar.
 
 ### Backend
 
@@ -171,14 +169,12 @@ cd backend
 ## Seguridad y acceso
 
 El sistema maneja infraestructura de cámaras de seguridad: todo, salvo
-`/health`, exige una sesión con segundo factor.
+`/health`, exige una sesión iniciada.
 
-**Ingreso en dos pasos.** Usuario y contraseña (Argon2id); después, el código
-de 6 dígitos de la app autenticadora o un código de recuperación de un solo
-uso. La cookie de sesión recién se emite al pasar el segundo factor; entre un
-paso y otro hay una pre-autenticación de 5 minutos y 5 intentos, atada al
-navegador. WebAuthn/FIDO2 (llaves de seguridad) tiene la estructura lista en la
-base (tabla `factores_mfa`, tipo `webauthn`) pero no está implementado.
+**Ingreso.** Usuario y contraseña (Argon2id); con la contraseña correcta se
+emite la cookie de sesión. No hay segundo factor: la contraseña es la única
+barrera, así que no conviene exponer el sistema a internet sin sumar otra capa
+(VPN, o volver a activar un segundo factor).
 
 **Sin enumeración de usuarios.** Usuario inexistente, contraseña incorrecta,
 cuenta bloqueada o deshabilitada: siempre "Credenciales inválidas.", con el
@@ -189,8 +185,7 @@ queda sólo en la auditoría.
 bloqueo siguiente dura el doble, y al cuarto queda bloqueada hasta que la
 desbloquee un administrador. Además, por ventana de 15 minutos: 20 fallos por
 IP y 10 por nombre de usuario (exista o no). Los límites se cuentan en la
-auditoría, así que sobreviven a un reinicio. Un código del segundo factor
-incorrecto también cuenta.
+auditoría, así que sobreviven a un reinicio.
 
 **Sesiones.** Token opaco de 256 bits en una cookie `__Host-sid` `HttpOnly`,
 `Secure` y `SameSite=Strict`; en el servidor sólo se guarda su hash. Se cierra
@@ -208,7 +203,7 @@ Entradas validadas con esquemas estrictos (pydantic `strict`, sin campos de
 más) y consultas SQL siempre parametrizadas.
 
 **Auditoría** (`backend/data/seguridad.db`, tabla `auditoria_accesos`). Cada
-intento de ingreso —exitoso o fallido—, cada segundo factor, cierre,
+intento de ingreso —exitoso o fallido—, cierre,
 revocación y acción administrativa, con hora UTC en microsegundos, IP real del
 cliente (resuelta detrás de proxies de confianza), IP de conexión,
 `X-Forwarded-For` crudo, navegador y usuario intentado. Es de sólo agregado
@@ -220,7 +215,6 @@ editar una fila se detecta con `verificar-auditoria`.
 ```powershell
 .\venv\Scripts\python.exe -m app.auth.cli listar-usuarios
 .\venv\Scripts\python.exe -m app.auth.cli desbloquear --usuario jperez
-.\venv\Scripts\python.exe -m app.auth.cli resetear-mfa --usuario jperez        # perdió el teléfono
 .\venv\Scripts\python.exe -m app.auth.cli resetear-password --usuario jperez   # provisoria
 .\venv\Scripts\python.exe -m app.auth.cli deshabilitar --usuario jperez        # y habilitar
 .\venv\Scripts\python.exe -m app.auth.cli revocar-sesiones --usuario jperez    # cierra ya mismo
@@ -271,10 +265,7 @@ Todas exigen sesión. Desde el navegador se llaman como `/api/...`.
 
 | Endpoint | Qué hace |
 |---|---|
-| `POST /auth/login` | Usuario y contraseña; abre el desafío del segundo factor |
-| `POST /auth/mfa/totp/enrolar` | Primer ingreso: secreto y QR para la app autenticadora |
-| `POST /auth/mfa/totp/confirmar` | Confirma el primer código; devuelve los códigos de recuperación y abre la sesión |
-| `POST /auth/mfa/verificar` | Código de la app o de recuperación; abre la sesión |
+| `POST /auth/login` | Usuario y contraseña; abre la sesión |
 | `GET /auth/sesion` | Usuario, token CSRF y vencimientos (cuenta como actividad) |
 | `POST /auth/logout` | Cierra la sesión en el servidor |
 | `GET /auth/sesiones` · `DELETE /auth/sesiones/{id}` · `POST /auth/sesiones/cerrar-otras` | Sesiones propias |

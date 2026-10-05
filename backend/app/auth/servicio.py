@@ -1,12 +1,8 @@
-"""Lógica de autenticación: login, bloqueo, segundo factor y sesiones.
+"""Lógica de autenticación: login, bloqueo y sesiones.
 
 Flujo:
 
-    contraseña ──► desafío (pre-autenticación, cookie __Host-preauth, 5 min)
-                    ├── sin factor: enrolar TOTP ──► confirmar código ──┐
-                    └── con factor: código TOTP o de recuperación ──────┴► sesión
-
-La cookie de sesión (__Host-sid) recién se emite al pasar el segundo factor.
+    usuario y contraseña ──► sesión (cookie __Host-sid)
 
 Convenciones de este módulo:
 
@@ -20,23 +16,22 @@ Convenciones de este módulo:
   el lock de escritura de toda la base mientras tanto.
 """
 
-import dataclasses
 import datetime as dt
 import hmac
 import re
-import secrets
 import sqlite3
 import unicodedata
 from dataclasses import dataclass
 
 from .. import config
-from . import auditoria, contrasenas, cripto, reloj, totp
+from . import auditoria, contrasenas, cripto, reloj
 from .contexto import ContextoPedido
 from .db import transaccion
 
 SAFE_METHODS = frozenset({"GET", "HEAD", "OPTIONS"})
-RECOVERY_CODES = 10
-_RECOVERY_ALPHABET = "ABCDEFGHJKMNPQRSTUVWXYZ23456789"  # sin 0/O, 1/I/L
+# La columna sesiones.metodo_mfa quedó de cuando había segundo factor; sigue en
+# el esquema para no migrar las bases existentes.
+METODO_LOGIN = "password"
 _USUARIO_VALIDO = re.compile(r"^[a-z0-9][a-z0-9._-]{2,63}$")
 # Revocaciones que hablan de un problema de seguridad: usar después una cookie
 # así revocada se audita. Las de rutina (inactividad, logout) no.
@@ -69,16 +64,6 @@ class CredencialesInvalidas(ErrorAuth):
 class DemasiadosIntentos(ErrorAuth):
     status = 429
     mensaje = "Demasiados intentos. Esperá unos minutos antes de volver a intentar."
-
-
-class VerificacionVencida(ErrorAuth):
-    status = 401
-    mensaje = "La verificación venció o no es válida. Ingresá de nuevo."
-
-
-class CodigoInvalido(ErrorAuth):
-    status = 401
-    mensaje = "Código inválido."
 
 
 class SesionInvalida(ErrorAuth):
@@ -114,21 +99,6 @@ class PasswordRechazada(ErrorAuth):
 
 
 @dataclass(frozen=True)
-class Desafio:
-    token: str
-    csrf: str
-    proposito: str  # "verificar" | "enrolar"
-    expira_en: dt.datetime
-
-
-@dataclass(frozen=True)
-class Enrolamiento:
-    secreto: str
-    uri: str
-    qr: str
-
-
-@dataclass(frozen=True)
 class SesionActiva:
     sesion_id: str
     usuario_id: int
@@ -140,8 +110,6 @@ class SesionActiva:
     expira_inactividad: dt.datetime
     expira_absoluta: dt.datetime
     nuevo_token: str | None = None  # si se rotó, la cookie a emitir
-    codigos_recuperacion: tuple[str, ...] | None = None  # recién enrolado
-    codigos_restantes: int | None = None  # si entró con uno de recuperación
 
 
 # --------------------------------------------------------------------------
@@ -252,10 +220,7 @@ def _registrar_fallo(
 
 def _limpiar_vencidos(conn: sqlite3.Connection, momento: dt.datetime) -> None:
     """Borra lo que ya no sirve. La auditoría, nunca."""
-    hace_un_dia = _iso(momento - dt.timedelta(days=1))
     hace_un_mes = _iso(momento - dt.timedelta(days=30))
-    conn.execute("DELETE FROM desafios_mfa WHERE expira_en < ?", (hace_un_dia,))
-    conn.execute("DELETE FROM factores_mfa WHERE confirmado = 0 AND creado_en < ?", (hace_un_dia,))
     conn.execute(
         "DELETE FROM sesiones WHERE revocada_en < ? OR expira_absoluta < ?", (hace_un_mes, hace_un_mes)
     )
@@ -333,10 +298,6 @@ def administrar(conn: sqlite3.Connection, usuario: str, accion: str, ctx: Contex
                 """,
                 (uid,),
             )
-        elif accion == "resetear_mfa":
-            conn.execute("DELETE FROM factores_mfa WHERE usuario_id = ?", (uid,))
-            conn.execute("DELETE FROM codigos_recuperacion WHERE usuario_id = ?", (uid,))
-            _revocar_todas(conn, uid, "administrador", momento)
         elif accion == "deshabilitar":
             conn.execute("UPDATE usuarios SET activo = 0 WHERE id = ?", (uid,))
             _revocar_todas(conn, uid, "administrador", momento)
@@ -375,9 +336,7 @@ def listar_usuarios(conn: sqlite3.Connection) -> list[dict]:
     filas = conn.execute(
         """
         SELECT u.usuario, u.nombre, u.rol, u.activo, u.bloqueado_permanente, u.bloqueado_hasta,
-               u.ultimo_acceso_en, EXISTS (
-                   SELECT 1 FROM factores_mfa f WHERE f.usuario_id = u.id AND f.confirmado = 1
-               ) AS tiene_mfa
+               u.ultimo_acceso_en
         FROM usuarios u ORDER BY u.usuario
         """
     ).fetchall()
@@ -385,37 +344,14 @@ def listar_usuarios(conn: sqlite3.Connection) -> list[dict]:
 
 
 # --------------------------------------------------------------------------
-# Paso 1: contraseña
+# Login
 # --------------------------------------------------------------------------
 
 
-def _crear_desafio(
-    conn: sqlite3.Connection, fila: sqlite3.Row, ctx: ContextoPedido, momento: dt.datetime
-) -> Desafio:
-    tiene_factor = conn.execute(
-        "SELECT 1 FROM factores_mfa WHERE usuario_id = ? AND confirmado = 1", (fila["id"],)
-    ).fetchone()
-    proposito = "verificar" if tiene_factor else "enrolar"
-    # Un solo desafío vivo por usuario: el nuevo invalida los anteriores.
-    conn.execute(
-        "UPDATE desafios_mfa SET consumido_en = ? WHERE usuario_id = ? AND consumido_en IS NULL",
-        (_iso(momento), fila["id"]),
-    )
-    token, csrf = cripto.nuevo_token(), cripto.nuevo_token(24)
-    expira = momento + dt.timedelta(minutes=config.PREAUTH_TTL_MINUTES)
-    conn.execute(
-        """
-        INSERT INTO desafios_mfa (id, token_hash, usuario_id, proposito, csrf, creado_en, expira_en, ip, user_agent)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-        """,
-        (cripto.nuevo_token(12), cripto.hash_token(token), fila["id"], proposito, csrf,
-         _iso(momento), _iso(expira), ctx.ip, ctx.user_agent),
-    )
-    return Desafio(token, csrf, proposito, expira)
-
-
-def iniciar_login(conn: sqlite3.Connection, usuario_ingresado: str, password: str, ctx: ContextoPedido) -> Desafio:
-    """Verifica la contraseña. Si es correcta, abre el desafío del segundo factor."""
+def iniciar_login(
+    conn: sqlite3.Connection, usuario_ingresado: str, password: str, ctx: ContextoPedido
+) -> SesionActiva:
+    """Verifica la contraseña. Si es correcta, abre la sesión."""
     usuario = normalizar_usuario(usuario_ingresado)
     momento = reloj.ahora()
     ventana = momento - dt.timedelta(minutes=config.LOGIN_WINDOW_MINUTES)
@@ -438,7 +374,7 @@ def iniciar_login(conn: sqlite3.Connection, usuario_ingresado: str, password: st
     correcta = contrasenas.verificar(fila["password_hash"] if fila else contrasenas.hash_senuelo(), password)
     rehash = contrasenas.hashear(password) if fila and correcta and contrasenas.necesita_rehash(fila["password_hash"]) else None
 
-    def _paso() -> Desafio | ErrorAuth:
+    def _paso() -> SesionActiva | ErrorAuth:
         actual = conn.execute("SELECT * FROM usuarios WHERE usuario = ?", (usuario,)).fetchone()
         if actual is None:
             auditoria.registrar(conn, "login_fallido", "fallo", ctx, usuario_intentado=usuario, motivo="usuario_inexistente")
@@ -456,237 +392,7 @@ def iniciar_login(conn: sqlite3.Connection, usuario_ingresado: str, password: st
             conn.execute("UPDATE usuarios SET password_hash = ? WHERE id = ?", (rehash, actual["id"]))
         auditoria.registrar(conn, "password_ok", "exito", ctx, usuario_intentado=usuario, usuario_id=actual["id"])
         _limpiar_vencidos(conn, momento)
-        return _crear_desafio(conn, actual, ctx, momento)
-
-    with transaccion(conn):
-        resultado = _paso()
-    if isinstance(resultado, ErrorAuth):
-        raise resultado
-    return resultado
-
-
-# --------------------------------------------------------------------------
-# Paso 2: segundo factor
-# --------------------------------------------------------------------------
-
-
-def _desafio_vigente(
-    conn: sqlite3.Connection, token: str | None, csrf: str | None, ctx: ContextoPedido, momento: dt.datetime
-) -> sqlite3.Row | ErrorAuth:
-    if not token:
-        return VerificacionVencida()
-    fila = conn.execute("SELECT * FROM desafios_mfa WHERE token_hash = ?", (cripto.hash_token(token),)).fetchone()
-    if fila is None or fila["consumido_en"] or fila["expira_en"] <= _iso(momento):
-        return VerificacionVencida()
-    if not origen_permitido(ctx.origen) or not hmac.compare_digest(fila["csrf"], csrf or ""):
-        auditoria.registrar(conn, "csrf_rechazado", "fallo", ctx, usuario_id=fila["usuario_id"], motivo="desafio_mfa")
-        return PedidoRechazado()
-    # Atado al navegador que lo empezó: una cookie de pre-autenticación
-    # copiada a otro equipo no sirve.
-    if fila["user_agent"] != ctx.user_agent:
-        conn.execute("UPDATE desafios_mfa SET consumido_en = ? WHERE id = ?", (_iso(momento), fila["id"]))
-        auditoria.registrar(conn, "desafio_otro_navegador", "fallo", ctx, usuario_id=fila["usuario_id"])
-        return VerificacionVencida()
-    return fila
-
-
-def _consumir(conn: sqlite3.Connection, desafio: sqlite3.Row, momento: dt.datetime) -> None:
-    conn.execute("UPDATE desafios_mfa SET consumido_en = ? WHERE id = ?", (_iso(momento), desafio["id"]))
-
-
-def _fallo_de_codigo(
-    conn: sqlite3.Connection,
-    desafio: sqlite3.Row,
-    usuario: sqlite3.Row,
-    ctx: ContextoPedido,
-    momento: dt.datetime,
-    motivo: str,
-) -> ErrorAuth:
-    """Un código incorrecto cuenta para el desafío y para el bloqueo de la cuenta:
-    quien llegó hasta acá ya tiene la contraseña."""
-    intentos = desafio["intentos"] + 1
-    conn.execute("UPDATE desafios_mfa SET intentos = ? WHERE id = ?", (intentos, desafio["id"]))
-    bloqueada = _registrar_fallo(conn, usuario, ctx, momento, evento="mfa_fallido", motivo=motivo)
-    if bloqueada or intentos >= config.MFA_MAX_ATTEMPTS:
-        _consumir(conn, desafio, momento)
-        auditoria.registrar(conn, "mfa_desafio_agotado", "fallo", ctx, usuario_intentado=usuario["usuario"], usuario_id=usuario["id"])
-        return VerificacionVencida()
-    return CodigoInvalido()
-
-
-def _usuario_del_desafio(
-    conn: sqlite3.Connection, desafio: sqlite3.Row, ctx: ContextoPedido, momento: dt.datetime
-) -> sqlite3.Row | ErrorAuth:
-    usuario = _usuario(conn, desafio["usuario_id"])
-    motivo = _bloqueada(usuario, momento)
-    if motivo or desafio["intentos"] >= config.MFA_MAX_ATTEMPTS:
-        _consumir(conn, desafio, momento)
-        auditoria.registrar(
-            conn, "mfa_fallido", "fallo", ctx, usuario_intentado=usuario["usuario"], usuario_id=usuario["id"],
-            motivo=motivo or "desafio_agotado",
-        )
-        return VerificacionVencida()
-    return usuario
-
-
-def _secreto(factor: sqlite3.Row) -> str:
-    return cripto.descifrar(factor["secreto_cifrado"], f"usuario:{factor['usuario_id']}")
-
-
-def iniciar_enrolamiento(
-    conn: sqlite3.Connection, token: str | None, csrf: str | None, ctx: ContextoPedido
-) -> Enrolamiento:
-    """Genera (o vuelve a mostrar) el secreto TOTP para escanear."""
-    momento = reloj.ahora()
-
-    def _paso() -> Enrolamiento | ErrorAuth:
-        desafio = _desafio_vigente(conn, token, csrf, ctx, momento)
-        if isinstance(desafio, ErrorAuth):
-            return desafio
-        if desafio["proposito"] != "enrolar":
-            return OperacionNoPermitida()
-        usuario = _usuario_del_desafio(conn, desafio, ctx, momento)
-        if isinstance(usuario, ErrorAuth):
-            return usuario
-        if desafio["factor_pendiente_id"]:
-            factor = conn.execute(
-                "SELECT * FROM factores_mfa WHERE id = ?", (desafio["factor_pendiente_id"],)
-            ).fetchone()
-            secreto = _secreto(factor)
-        else:
-            secreto = totp.nuevo_secreto()
-            cursor = conn.execute(
-                "INSERT INTO factores_mfa (usuario_id, tipo, secreto_cifrado, creado_en) VALUES (?, 'totp', ?, ?)",
-                (usuario["id"], cripto.cifrar(secreto, f"usuario:{usuario['id']}"), _iso(momento)),
-            )
-            conn.execute(
-                "UPDATE desafios_mfa SET factor_pendiente_id = ? WHERE id = ?", (cursor.lastrowid, desafio["id"])
-            )
-        uri = totp.uri_aprovisionamiento(secreto, usuario["usuario"], config.TOTP_ISSUER)
-        return Enrolamiento(secreto, uri, totp.qr_data_uri(uri))
-
-    with transaccion(conn):
-        resultado = _paso()
-    if isinstance(resultado, ErrorAuth):
-        raise resultado
-    return resultado
-
-
-def _codigos_de_recuperacion() -> list[str]:
-    def uno() -> str:
-        letras = "".join(secrets.choice(_RECOVERY_ALPHABET) for _ in range(12))
-        return f"{letras[:4]}-{letras[4:8]}-{letras[8:]}"
-
-    return [uno() for _ in range(RECOVERY_CODES)]
-
-
-def normalizar_codigo_recuperacion(texto: str) -> str:
-    plano = re.sub(r"[\s-]", "", texto).upper()
-    return f"{plano[:4]}-{plano[4:8]}-{plano[8:]}"
-
-
-def _hmac_recuperacion(usuario_id: int, codigo: str) -> str:
-    return cripto.firmar("recuperacion", f"{usuario_id}:{normalizar_codigo_recuperacion(codigo)}")
-
-
-def confirmar_enrolamiento(
-    conn: sqlite3.Connection, token: str | None, csrf: str | None, codigo: str, ctx: ContextoPedido
-) -> SesionActiva:
-    """El primer código de la app confirma el factor y abre la sesión."""
-    momento = reloj.ahora()
-
-    def _paso() -> SesionActiva | ErrorAuth:
-        desafio = _desafio_vigente(conn, token, csrf, ctx, momento)
-        if isinstance(desafio, ErrorAuth):
-            return desafio
-        if desafio["proposito"] != "enrolar" or not desafio["factor_pendiente_id"]:
-            return OperacionNoPermitida()
-        usuario = _usuario_del_desafio(conn, desafio, ctx, momento)
-        if isinstance(usuario, ErrorAuth):
-            return usuario
-        factor = conn.execute("SELECT * FROM factores_mfa WHERE id = ?", (desafio["factor_pendiente_id"],)).fetchone()
-        paso = totp.verificar(_secreto(factor), codigo, momento, None)
-        if paso is None:
-            return _fallo_de_codigo(conn, desafio, usuario, ctx, momento, "codigo_de_enrolamiento_incorrecto")
-
-        conn.execute(
-            "UPDATE factores_mfa SET confirmado = 1, confirmado_en = ?, ultimo_paso = ? WHERE id = ?",
-            (_iso(momento), paso, factor["id"]),
-        )
-        conn.execute(
-            "DELETE FROM factores_mfa WHERE usuario_id = ? AND confirmado = 0", (usuario["id"],)
-        )
-        codigos = _codigos_de_recuperacion()
-        conn.execute("DELETE FROM codigos_recuperacion WHERE usuario_id = ?", (usuario["id"],))
-        conn.executemany(
-            "INSERT INTO codigos_recuperacion (usuario_id, codigo_hmac) VALUES (?, ?)",
-            [(usuario["id"], _hmac_recuperacion(usuario["id"], codigo_nuevo)) for codigo_nuevo in codigos],
-        )
-        auditoria.registrar(conn, "mfa_enrolado", "exito", ctx, usuario_intentado=usuario["usuario"], usuario_id=usuario["id"], motivo="totp")
-        _consumir(conn, desafio, momento)
-        sesion = _abrir_sesion(conn, usuario, ctx, momento, "totp")
-        return dataclasses.replace(sesion, codigos_recuperacion=tuple(codigos))
-
-    with transaccion(conn):
-        resultado = _paso()
-    if isinstance(resultado, ErrorAuth):
-        raise resultado
-    return resultado
-
-
-def verificar_mfa(
-    conn: sqlite3.Connection,
-    token: str | None,
-    csrf: str | None,
-    ctx: ContextoPedido,
-    *,
-    codigo: str | None = None,
-    codigo_recuperacion: str | None = None,
-) -> SesionActiva:
-    """Segundo factor: código de la app o, si se perdió, uno de recuperación."""
-    momento = reloj.ahora()
-
-    def _paso() -> SesionActiva | ErrorAuth:
-        desafio = _desafio_vigente(conn, token, csrf, ctx, momento)
-        if isinstance(desafio, ErrorAuth):
-            return desafio
-        if desafio["proposito"] != "verificar":
-            return OperacionNoPermitida()
-        usuario = _usuario_del_desafio(conn, desafio, ctx, momento)
-        if isinstance(usuario, ErrorAuth):
-            return usuario
-
-        metodo: str | None = None
-        restantes: int | None = None
-        if codigo is not None:
-            factor = conn.execute(
-                "SELECT * FROM factores_mfa WHERE usuario_id = ? AND tipo = 'totp' AND confirmado = 1",
-                (usuario["id"],),
-            ).fetchone()
-            paso = totp.verificar(_secreto(factor), codigo, momento, factor["ultimo_paso"]) if factor else None
-            if paso is not None:
-                conn.execute("UPDATE factores_mfa SET ultimo_paso = ? WHERE id = ?", (paso, factor["id"]))
-                metodo = "totp"
-        elif codigo_recuperacion is not None:
-            usado = conn.execute(
-                """
-                UPDATE codigos_recuperacion SET usado_en = ?
-                WHERE usuario_id = ? AND codigo_hmac = ? AND usado_en IS NULL
-                """,
-                (_iso(momento), usuario["id"], _hmac_recuperacion(usuario["id"], codigo_recuperacion)),
-            ).rowcount
-            if usado:
-                metodo = "recuperacion"
-                restantes = conn.execute(
-                    "SELECT COUNT(*) FROM codigos_recuperacion WHERE usuario_id = ? AND usado_en IS NULL",
-                    (usuario["id"],),
-                ).fetchone()[0]
-
-        if metodo is None:
-            return _fallo_de_codigo(conn, desafio, usuario, ctx, momento, "codigo_incorrecto")
-        _consumir(conn, desafio, momento)
-        sesion = _abrir_sesion(conn, usuario, ctx, momento, metodo)
-        return dataclasses.replace(sesion, codigos_restantes=restantes)
+        return _abrir_sesion(conn, actual, ctx, momento)
 
     with transaccion(conn):
         resultado = _paso()
@@ -723,7 +429,7 @@ def _activa(fila: sqlite3.Row, usuario: sqlite3.Row, nuevo_token: str | None = N
 
 
 def _abrir_sesion(
-    conn: sqlite3.Connection, usuario: sqlite3.Row, ctx: ContextoPedido, momento: dt.datetime, metodo: str
+    conn: sqlite3.Connection, usuario: sqlite3.Row, ctx: ContextoPedido, momento: dt.datetime
 ) -> SesionActiva:
     # Tope de sesiones simultáneas: se cierran las menos usadas.
     activas = conn.execute(
@@ -749,7 +455,7 @@ def _abrir_sesion(
                               ultima_actividad, expira_absoluta, ip_inicio, ip_ultima, user_agent)
         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
-        (sesion_id, usuario["id"], cripto.hash_token(token), _iso(momento), cripto.nuevo_token(24), metodo,
+        (sesion_id, usuario["id"], cripto.hash_token(token), _iso(momento), cripto.nuevo_token(24), METODO_LOGIN,
          _iso(momento), _iso(momento), _iso(momento + dt.timedelta(hours=config.SESSION_ABSOLUTE_HOURS)),
          ctx.ip, ctx.ip, ctx.user_agent),
     )
@@ -760,9 +466,6 @@ def _abrir_sesion(
         WHERE id = ?
         """,
         (_iso(momento), usuario["id"]),
-    )
-    auditoria.registrar(
-        conn, "mfa_ok", "exito", ctx, usuario_intentado=usuario["usuario"], usuario_id=usuario["id"], motivo=metodo
     )
     auditoria.registrar(
         conn, "sesion_iniciada", "exito", ctx, usuario_intentado=usuario["usuario"], usuario_id=usuario["id"],
@@ -894,7 +597,7 @@ def cerrar_sesion(conn: sqlite3.Connection, sesion: SesionActiva, ctx: ContextoP
 def listar_sesiones(conn: sqlite3.Connection, sesion: SesionActiva) -> list[dict]:
     filas = conn.execute(
         """
-        SELECT id, creada_en, ultima_actividad, ip_inicio, ip_ultima, user_agent, metodo_mfa
+        SELECT id, creada_en, ultima_actividad, ip_inicio, ip_ultima, user_agent
         FROM sesiones WHERE usuario_id = ? AND revocada_en IS NULL AND expira_absoluta > ?
         ORDER BY ultima_actividad DESC
         """,

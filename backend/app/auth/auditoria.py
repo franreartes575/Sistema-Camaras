@@ -19,7 +19,7 @@ from .contexto import ContextoPedido
 from .db import transaccion
 
 GENESIS = "0" * 64
-FALLOS_DE_CREDENCIALES = ("login_fallido", "mfa_fallido")
+FALLOS_DE_CREDENCIALES = ("login_fallido",)
 # Por IP cuentan también los pedidos de login con formato inválido: una IP que
 # manda basura en cantidad no merece más intentos.
 FALLOS_POR_IP = (*FALLOS_DE_CREDENCIALES, "login_rechazado")

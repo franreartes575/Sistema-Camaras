@@ -1,7 +1,6 @@
 """Tests unitarios de las piezas criptográficas y de red del login."""
 
 import base64
-import datetime as dt
 import hashlib
 import os
 import stat
@@ -9,56 +8,7 @@ import stat
 import pytest
 
 from app import config, red
-from app.auth import cripto, totp
-
-# --------------------------------------------------------------------------
-# TOTP: vectores oficiales del RFC 6238 (apéndice B, SHA-1, 8 dígitos)
-# --------------------------------------------------------------------------
-
-SECRETO_RFC = base64.b32encode(b"12345678901234567890").decode()
-
-
-@pytest.mark.parametrize(
-    ("segundos", "esperado"),
-    [
-        (59, "94287082"),
-        (1111111109, "07081804"),
-        (1111111111, "14050471"),
-        (1234567890, "89005924"),
-        (2000000000, "69279037"),
-        (20000000000, "65353130"),
-    ],
-)
-def test_totp_vectores_rfc_6238(segundos, esperado) -> None:
-    assert totp.codigo(SECRETO_RFC, segundos // 30, digitos=8, algoritmo=hashlib.sha1) == esperado
-
-
-def test_totp_ventana_y_anti_reuso() -> None:
-    secreto = totp.nuevo_secreto()
-    ahora = dt.datetime(2026, 10, 2, 12, 0, 15, tzinfo=dt.timezone.utc)
-    paso = totp.paso(ahora)
-
-    assert totp.verificar(secreto, totp.codigo(secreto, paso), ahora, None) == paso
-    assert totp.verificar(secreto, totp.codigo(secreto, paso - 1), ahora, None) == paso - 1  # reloj atrasado
-    assert totp.verificar(secreto, totp.codigo(secreto, paso + 1), ahora, None) == paso + 1  # adelantado
-    assert totp.verificar(secreto, totp.codigo(secreto, paso - 2), ahora, None) is None  # fuera de ventana
-    assert totp.verificar(secreto, totp.codigo(secreto, paso), ahora, paso) is None  # ya usado
-    assert totp.verificar(secreto, totp.codigo(secreto, paso + 1), ahora, paso) == paso + 1
-
-
-def test_totp_secreto_de_160_bits() -> None:
-    secreto = totp.nuevo_secreto()
-
-    assert len(secreto) == 32  # 160 bits en base32, sin relleno
-    assert len(base64.b32decode(secreto)) == 20
-
-
-def test_totp_uri_para_las_apps() -> None:
-    uri = totp.uri_aprovisionamiento("ABC", "j.perez", "Recorridos Camaras")
-
-    assert uri.startswith("otpauth://totp/Recorridos%20Camaras%3Aj.perez?")
-    assert "secret=ABC" in uri and "digits=6" in uri and "period=30" in uri
-
+from app.auth import cripto
 
 # --------------------------------------------------------------------------
 # IP real detrás de proxies
@@ -105,19 +55,10 @@ def test_header_gigante_se_recorta() -> None:
 # --------------------------------------------------------------------------
 
 
-def test_cifrado_autenticado_con_contexto() -> None:
-    blob = cripto.cifrar("JBSWY3DPEHPK3PXP", "usuario:1")
-
-    assert cripto.descifrar(blob, "usuario:1") == "JBSWY3DPEHPK3PXP"
-    assert cripto.cifrar("JBSWY3DPEHPK3PXP", "usuario:1") != blob  # nonce nuevo cada vez
-    alterado = base64.b64encode(base64.b64decode(blob)[:-1] + b"\x00").decode()
-    with pytest.raises(Exception):
-        cripto.descifrar(alterado, "usuario:1")
-
-
 def test_subclaves_independientes_por_proposito() -> None:
-    assert cripto.subclave("totp") != cripto.subclave("auditoria") != cripto.subclave("recuperacion")
-    assert cripto.subclave("totp") != cripto.clave_maestra()
+    assert cripto.subclave("auditoria") != cripto.subclave("otro-proposito")
+    assert cripto.subclave("auditoria") == cripto.subclave("auditoria")  # determinista
+    assert cripto.subclave("auditoria") != cripto.clave_maestra()
 
 
 @pytest.mark.parametrize("valor", ["no-es-base64!!", base64.b64encode(b"corta").decode()])

@@ -4,7 +4,6 @@
     python -m app.auth.cli crear-usuario --usuario jperez --nombre "Juan Pérez" --rol operador
     python -m app.auth.cli listar-usuarios
     python -m app.auth.cli desbloquear --usuario jperez
-    python -m app.auth.cli resetear-mfa --usuario jperez
     python -m app.auth.cli resetear-password --usuario jperez
     python -m app.auth.cli deshabilitar --usuario jperez        (y habilitar)
     python -m app.auth.cli revocar-sesiones --usuario jperez
@@ -52,7 +51,7 @@ def _inicializar(_: argparse.Namespace) -> None:
             cripto.guardar_clave_maestra(ruta)
             print(f"Clave maestra creada en {ruta} (sólo lectura para el dueño).")
             print("RESPALDALA en un lugar seguro y separado de la base: sin ella no se")
-            print("pueden verificar los segundos factores ni la auditoría.")
+            print("puede verificar la auditoría.")
     cripto.clave_maestra()
     db.connect().close()
     print(f"Base de seguridad lista en {config.AUTH_DB_PATH}.")
@@ -68,8 +67,7 @@ def _crear_usuario(args: argparse.Namespace) -> None:
         )
     finally:
         conn.close()
-    print(f"Usuario '{servicio.normalizar_usuario(args.usuario)}' creado. En el primer ingreso")
-    print("va a configurar su app autenticadora (segundo factor obligatorio).")
+    print(f"Usuario '{servicio.normalizar_usuario(args.usuario)}' creado.")
 
 
 def _listar(_: argparse.Namespace) -> None:
@@ -78,7 +76,7 @@ def _listar(_: argparse.Namespace) -> None:
         filas = servicio.listar_usuarios(conn)
     finally:
         conn.close()
-    print(f"{'usuario':<20} {'rol':<9} {'estado':<22} {'MFA':<4} último acceso")
+    print(f"{'usuario':<20} {'rol':<9} {'estado':<22} último acceso")
     for fila in filas:
         if not fila["activo"]:
             estado = "deshabilitado"
@@ -89,7 +87,7 @@ def _listar(_: argparse.Namespace) -> None:
         else:
             estado = "activo"
         print(
-            f"{fila['usuario']:<20} {fila['rol']:<9} {estado:<22} {'sí' if fila['tiene_mfa'] else 'no':<4} "
+            f"{fila['usuario']:<20} {fila['rol']:<9} {estado:<22} "
             f"{fila['ultimo_acceso_en'] or '—'}"
         )
 
@@ -158,7 +156,6 @@ def main(argv: list[str] | None = None) -> None:
 
     for comando, accion, ayuda in (
         ("desbloquear", "desbloquear", "Levanta un bloqueo temporal o permanente"),
-        ("resetear-mfa", "resetear_mfa", "Borra el segundo factor: lo vuelve a configurar al entrar"),
         ("deshabilitar", "deshabilitar", "Impide el acceso y cierra sus sesiones"),
         ("habilitar", "habilitar", "Vuelve a permitir el acceso"),
         ("revocar-sesiones", "revocar_sesiones", "Cierra todas sus sesiones ya mismo"),

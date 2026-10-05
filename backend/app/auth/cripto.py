@@ -15,13 +15,11 @@ from functools import lru_cache
 from pathlib import Path
 
 from cryptography.hazmat.primitives import hashes
-from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 from cryptography.hazmat.primitives.kdf.hkdf import HKDF
 
 from .. import config
 
 MASTER_KEY_BYTES = 32
-_NONCE_BYTES = 12
 
 
 class ClaveMaestraFaltante(RuntimeError):
@@ -35,8 +33,7 @@ def generar_clave_maestra() -> str:
 def guardar_clave_maestra(ruta: Path) -> None:
     """Crea el archivo de la clave con permisos sólo para el dueño.
 
-    Falla si ya existe: pisar la clave dejaría ilegibles los secretos TOTP y
-    rota la verificación de la auditoría.
+    Falla si ya existe: pisar la clave rompería la verificación de la auditoría.
     """
     ruta.parent.mkdir(parents=True, exist_ok=True)
     flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
@@ -82,20 +79,6 @@ def _derivar(maestra: bytes, proposito: str) -> bytes:
 
 def subclave(proposito: str) -> bytes:
     return _derivar(clave_maestra(), proposito)
-
-
-def cifrar(texto: str, contexto: str) -> str:
-    """AES-256-GCM. `contexto` (p. ej. el id del usuario) va como dato
-    asociado: un secreto copiado a la fila de otro usuario no descifra."""
-    nonce = secrets.token_bytes(_NONCE_BYTES)
-    cifrado = AESGCM(subclave("totp")).encrypt(nonce, texto.encode(), contexto.encode())
-    return base64.b64encode(nonce + cifrado).decode()
-
-
-def descifrar(blob: str, contexto: str) -> str:
-    crudo = base64.b64decode(blob)
-    nonce, cifrado = crudo[:_NONCE_BYTES], crudo[_NONCE_BYTES:]
-    return AESGCM(subclave("totp")).decrypt(nonce, cifrado, contexto.encode()).decode()
 
 
 def firmar(proposito: str, datos: str) -> str:
