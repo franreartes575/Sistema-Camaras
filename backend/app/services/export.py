@@ -10,7 +10,9 @@ oculta ("_registro") lleva su id: al cargar el seguimiento se actualiza ese
 plan y no otro con la misma cámara y fecha.
 
 El mismo formato sirve para exportar tareas del registro (`build_tasks_workbook`):
-lo pendiente vuelve a entrar por el paso 1 del planificador tal cual.
+lo pendiente vuelve a entrar por el paso 1 del planificador tal cual. Y las
+cámaras elegidas del catálogo salen como planilla de entrada
+(`build_catalog_workbook`) para recorrer el mismo camino que una subida.
 """
 
 import datetime as dt
@@ -23,7 +25,7 @@ from openpyxl.styles import Alignment, Font, PatternFill
 from openpyxl.worksheet.datavalidation import DataValidation
 from openpyxl.worksheet.worksheet import Worksheet
 
-from ..schemas import ExportDay, ExportRequest, Task
+from ..schemas import CatalogCamera, ExportDay, ExportRequest, Task
 
 FOLLOW_UP_COLUMNS = [
     "ID de la cámara",
@@ -260,6 +262,48 @@ def build_tasks_workbook(tasks: list[Task]) -> bytes:
         )
     _finish_follow_up(sheet, _WIDTHS + _TASK_EXTRA_WIDTHS)
     return _save(workbook)
+
+
+# Planilla de entrada armada desde el catálogo. Los encabezados son los que
+# `suggest_mapping` reconoce solo: subida al planificador, no hay que mapear nada.
+CATALOG_COLUMNS = [
+    "ID de la cámara",
+    "Latitud",
+    "Longitud",
+    "Descripción",
+    "Nodo preliminar",
+    "Observación",
+    "Localidad",
+]
+_CATALOG_WIDTHS = [18, 12, 12, 40, 26, 40, 24]
+
+
+def build_catalog_workbook(cameras: list[CatalogCamera]) -> bytes:
+    """Planilla de entrada al planificador con las cámaras elegidas del catálogo.
+
+    Es un .xlsx y no un CSV porque al leer un CSV pandas convierte en número un
+    ID como "00123" y pierde los ceros: dejaría de coincidir con el catálogo y
+    con el registro. En el .xlsx el ID va como texto.
+    """
+    workbook = Workbook()
+    sheet = workbook.active
+    sheet.title = "Cámaras"
+    sheet.append(CATALOG_COLUMNS)
+    for camera in cameras:
+        row = sheet.max_row + 1
+        _set_text(sheet.cell(row=row, column=1), camera.id)
+        sheet.cell(row=row, column=2, value=camera.lat)
+        sheet.cell(row=row, column=3, value=camera.lon)
+        _set_text(sheet.cell(row=row, column=4), camera.label)
+        _set_text(sheet.cell(row=row, column=5), camera.node)
+        _set_text(sheet.cell(row=row, column=6), camera.observation)
+        _set_text(sheet.cell(row=row, column=7), camera.locality)
+    _style_header(sheet, _CATALOG_WIDTHS)
+    return _save(workbook)
+
+
+def catalog_filename(count: int, today: dt.date) -> str:
+    return f"catalogo-{count}-camaras-{today.isoformat()}.xlsx"
 
 
 def tasks_filename(today: dt.date) -> str:

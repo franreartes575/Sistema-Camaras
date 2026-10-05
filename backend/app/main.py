@@ -26,7 +26,9 @@ from .config import (
     RATE_LIMIT_PROCESS_MAX,
     RATE_LIMIT_UPLOAD_MAX,
 )
+from .catalogo_route import router as catalogo_router
 from .export_route import router as export_router
+from .ingesta import MAX_SPAN_PLAUSIBLE_KM, ColumnMap, ingest_points
 from .registro_route import router as registro_router
 from .security import rate_limiter, require_api_key
 from .uploads import read_upload as _read_upload
@@ -42,19 +44,8 @@ from .schemas import (
     SuggestedMapping,
     UploadExcelResponse,
 )
-from .services.clustering import (
-    bounding_span_km,
-    haversine_km,
-    reassign_noise,
-    run_dbscan,
-)
-from .services.ingest import (
-    extract_points,
-    read_dataframe,
-    read_headers,
-    split_done,
-    suggest_mapping,
-)
+from .services.clustering import haversine_km, reassign_noise, run_dbscan
+from .services.ingest import read_headers, suggest_mapping
 from .services.routing import (
     BudgetInfeasibleError,
     ClusterTooLargeError,
@@ -63,11 +54,6 @@ from .services.routing import (
     select_provider,
 )
 from .services.vrp import build_day_routes
-
-# Salta mide unos 600 km de punta a punta. Si las coordenadas leidas abarcan
-# bastante mas que eso, lo mas probable es que el mapeo apunte a columnas que
-# contienen numeros pero no coordenadas.
-MAX_SPAN_PLAUSIBLE_KM = 800.0
 
 logger = logging.getLogger(__name__)
 
@@ -110,6 +96,7 @@ app.include_router(auth_router)
 # Todo lo que no es /auth ni /health exige una sesión iniciada.
 app.include_router(export_router, dependencies=[Depends(requiere_sesion)])
 app.include_router(registro_router, dependencies=[Depends(requiere_sesion)])
+app.include_router(catalogo_router, dependencies=[Depends(requiere_sesion)])
 
 
 @app.get("/health")
@@ -172,38 +159,6 @@ class Clustered(NamedTuple):
     warning: str | None
 
 
-def _mapping_warning(
-    span_km: float, valid: int, total: int, origen: str
-) -> str | None:
-    """Avisa cuando el resultado no se parece a un conjunto de camaras reales."""
-    if span_km > MAX_SPAN_PLAUSIBLE_KM:
-        return (
-            f"Las coordenadas leídas de {origen} abarcan {span_km:,.0f} km, "
-            f"mucho más que una provincia. Es casi seguro que esa columna no "
-            f"contiene coordenadas. Revise el mapeo."
-        )
-    if total >= 5 and valid < total / 2:
-        return (
-            f"Sólo {valid} de {total} filas dieron coordenadas válidas. "
-            f"Verifique que {origen} sea la columna correcta."
-        )
-    return None
-
-
-class ColumnMap(NamedTuple):
-    """Qué columna de la planilla cumple cada rol (vacío = no se usa)."""
-
-    col_id: str
-    col_lat: str | None
-    col_lon: str | None
-    col_coords: str | None
-    coord_order: str
-    col_label: str | None
-    col_node: str | None = None
-    col_obs: str | None = None
-    col_done: str | None = None
-
-
 async def _ingest_and_cluster(
     file: UploadFile,
     columns: ColumnMap,
@@ -212,73 +167,9 @@ async def _ingest_and_cluster(
     noise_reassign_factor: float,
 ) -> Clustered:
     """Lee la planilla, aparta lo realizado, valida coordenadas y agrupa con DBSCAN."""
-    col_lat, col_lon, col_coords = columns.col_lat, columns.col_lon, columns.col_coords
-    filename, raw = await _read_upload(file)
-
-    try:
-        frame = read_dataframe(filename, raw)
-    except Exception as exc:
-        logger.warning("No se pudo leer la planilla '%s': %s", filename, exc)
-        raise HTTPException(
-            status_code=422,
-            detail=(
-                "No se pudo leer la planilla. Verifique que sea un archivo "
-                "Excel (.xlsx/.xlsm) o CSV válido."
-            ),
-        ) from exc
-
-    total_rows = len(frame)
-    if total_rows == 0:
-        raise HTTPException(status_code=422, detail="La planilla no tiene filas.")
-
-    try:
-        # Un Excel de seguimiento ya completado: lo tildado como realizado no
-        # se vuelve a planificar.
-        frame, done_rows = split_done(frame, columns.col_done or None)
-        if frame.empty:
-            raise HTTPException(
-                status_code=422,
-                detail=(
-                    f"Las {done_rows} filas están marcadas como realizadas: no "
-                    f"queda nada pendiente para planificar."
-                ),
-            )
-        points, discarded = extract_points(
-            frame,
-            columns.col_id,
-            col_lat=col_lat or None,
-            col_lon=col_lon or None,
-            col_label=columns.col_label or None,
-            col_coords=col_coords or None,
-            coord_order=columns.coord_order,
-            col_node=columns.col_node or None,
-            col_obs=columns.col_obs or None,
-        )
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
-
-    if points.empty:
-        usadas = (
-            f"columna combinada '{col_coords}'"
-            if col_coords
-            else f"latitud '{col_lat}' y longitud '{col_lon}'"
-        )
-        raise HTTPException(
-            status_code=422,
-            detail=(
-                f"Ninguna de las {len(frame)} filas dio coordenadas válidas "
-                f"leyendo {usadas}. Verifique que el mapeo de columnas sea el "
-                f"correcto y que esa columna contenga números."
-            ),
-        )
-
-    span_km = bounding_span_km(points)
-    origen = (
-        f"la columna '{col_coords}'"
-        if col_coords
-        else f"las columnas '{col_lat}' y '{col_lon}'"
-    )
-    warning = _mapping_warning(span_km, len(points), len(frame), origen)
+    ingested = await ingest_points(file, columns)
+    points = ingested.points
+    warning = ingested.warning
 
     labels, clusters = run_dbscan(points, eps_km=eps_km, min_samples=min_samples)
     original_labels = labels
@@ -312,21 +203,21 @@ async def _ingest_and_cluster(
         warning = f"{warning} {aviso_ruido}" if warning else aviso_ruido
 
     return Clustered(
-        filename=filename,
+        filename=ingested.filename,
         stats=IngestStats(
-            total_rows=total_rows,
+            total_rows=ingested.total_rows,
             valid_rows=len(cameras),
-            discarded_rows=len(discarded),
-            done_rows=done_rows,
+            discarded_rows=len(ingested.discarded),
+            done_rows=ingested.done_rows,
             cluster_count=len(clusters),
             noise_count=sin_rutear,
             eps_km=eps_km,
             min_samples=min_samples,
-            span_km=round(span_km, 1),
+            span_km=round(ingested.span_km, 1),
         ),
         cameras=cameras,
         clusters=[Cluster(**cluster) for cluster in clusters],
-        discarded=[DiscardedRow(**row) for row in discarded],
+        discarded=[DiscardedRow(**row) for row in ingested.discarded],
         warning=warning,
     )
 

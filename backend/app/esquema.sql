@@ -10,6 +10,9 @@
 --   └─ recorridos       una jornada: fecha, salida, distancia, polilínea
 --      └─ paradas       una cámara a visitar = una tarea, con su estado
 --   cargas_seguimiento  historial de Excel de seguimiento cargados
+--   camaras             catálogo: todas las cámaras, se planifiquen o no
+--   sedes               bases operativas de las que salen las cuadrillas
+--   cargas_catalogo     historial de planillas importadas al catálogo
 --
 -- El estado guardado de una parada es el que informaron los técnicos
 -- (pendiente / realizada / no_realizada). "Reprogramada" no se guarda: se
@@ -73,11 +76,48 @@ CREATE TABLE IF NOT EXISTS cargas_seguimiento (
     sin_coincidencia INTEGER NOT NULL
 );
 
+-- Catálogo de cámaras. El id es el mismo texto que `paradas.camara_id`: el
+-- cruce con el registro es por ahí, sin clave foránea, porque un plan puede
+-- tener cámaras que (todavía) no están en el catálogo.
+CREATE TABLE IF NOT EXISTS camaras (
+    id               TEXT    PRIMARY KEY,
+    lat              REAL    NOT NULL,
+    lon              REAL    NOT NULL,
+    localidad        TEXT    NOT NULL DEFAULT 'Sin calcular',  -- municipio, por coordenadas
+    localidad_manual INTEGER NOT NULL DEFAULT 0 CHECK (localidad_manual IN (0, 1)),
+    descripcion      TEXT,
+    nodo             TEXT,
+    observacion      TEXT,
+    creada_en        TEXT    NOT NULL DEFAULT (datetime('now', 'localtime')),
+    actualizada_en   TEXT    NOT NULL DEFAULT (datetime('now', 'localtime'))
+);
+
+CREATE TABLE IF NOT EXISTS sedes (
+    id        INTEGER PRIMARY KEY AUTOINCREMENT,
+    nombre    TEXT    NOT NULL UNIQUE COLLATE NOCASE,
+    lat       REAL    NOT NULL,
+    lon       REAL    NOT NULL,
+    creada_en TEXT    NOT NULL DEFAULT (datetime('now', 'localtime'))
+);
+
+CREATE TABLE IF NOT EXISTS cargas_catalogo (
+    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    archivo      TEXT    NOT NULL,
+    sha256       TEXT    NOT NULL,
+    cargado_en   TEXT    NOT NULL DEFAULT (datetime('now', 'localtime')),
+    filas        INTEGER NOT NULL,
+    nuevas       INTEGER NOT NULL,
+    actualizadas INTEGER NOT NULL,
+    sin_cambios  INTEGER NOT NULL,
+    descartadas  INTEGER NOT NULL
+);
+
 CREATE INDEX IF NOT EXISTS idx_recorridos_plan  ON recorridos (plan_id);
 CREATE INDEX IF NOT EXISTS idx_recorridos_fecha ON recorridos (fecha);
 CREATE INDEX IF NOT EXISTS idx_paradas_recorrido ON paradas (recorrido_id);
 CREATE INDEX IF NOT EXISTS idx_paradas_camara   ON paradas (camara_id);
 CREATE INDEX IF NOT EXISTS idx_cargas_sha256    ON cargas_seguimiento (sha256);
+CREATE INDEX IF NOT EXISTS idx_camaras_localidad ON camaras (localidad);
 
 -- Cada parada con su jornada y su estado efectivo. Una tarea que quedó
 -- pendiente (o no realizada) y cuya cámara aparece en un plan posterior ya no
