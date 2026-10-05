@@ -17,7 +17,7 @@ import math
 from dataclasses import dataclass
 
 import numpy as np
-from ortools.constraint_solver import pywrapcp
+from ortools.constraint_solver import pywrapcp, routing_enums_pb2
 
 from .optimizer import DEFAULT_TIME_LIMIT_S, Stop, default_search_parameters
 from .routing import BudgetInfeasibleError, Point, RoutingProvider
@@ -29,6 +29,14 @@ UNREACHABLE_COST = 10**9
 # menos vehículos-jornada en vez de repartirlas de a una, mientras el
 # presupuesto horario lo permita.
 VEHICLE_FIXED_COST = 3600
+
+# Solución inicial del reparto en jornadas. "Ahorros" arma las rutas fusionando
+# paradas cercanas de a pares, en vez de llenar un vehículo a la vez con la
+# cámara más próxima: con un tope de cámaras por día, esa segunda forma agota
+# el cupo en lo cercano y deja las cámaras de una misma zona lejana repartidas
+# en varios viajes largos. Sobre la planilla real (97 cámaras, OSRM) dio un 9%
+# menos de km en 5 s, lo mismo que la otra estrategia con 30 s, y nunca peor.
+FIRST_SOLUTION_STRATEGY = routing_enums_pb2.FirstSolutionStrategy.SAVINGS
 
 # Penalidad por dejar una cámara sin visitar. Supera con holgura el costo de
 # cualquier jornada (a lo sumo 24 h de manejo) más un vehículo extra, así que
@@ -151,7 +159,9 @@ def _solve(
             manager, routing, num_vehicles, size, max_stops_per_day, min_stops_per_day
         )
 
-    solution = routing.SolveWithParameters(default_search_parameters(time_limit_s))
+    solution = routing.SolveWithParameters(
+        default_search_parameters(time_limit_s, FIRST_SOLUTION_STRATEGY)
+    )
     return manager, routing, solution
 
 

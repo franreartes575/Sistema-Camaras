@@ -1,4 +1,4 @@
-"""Endpoints de /auth: login en dos pasos, sesión, cierre y auditoría.
+"""Endpoints de /auth: login, sesión, cierre y auditoría.
 
 Son `def` (no `async def`): Argon2 y SQLite bloquean, y FastAPI corre las
 funciones sincrónicas en un hilo sin frenar el event loop.
@@ -13,9 +13,7 @@ from .. import config
 from . import auditoria, servicio
 from .contexto import ContextoPedido
 from .dependencias import (
-    COOKIE_PREAUTH,
     COOKIE_SESION,
-    HEADER_CSRF,
     AuthDb,
     programar_borrado,
     programar_cookie,
@@ -25,15 +23,11 @@ from .dependencias import (
 )
 from .esquemas import (
     CambioPasswordIn,
-    CodigoTotpIn,
-    EnrolamientoOut,
     EventoAuditoriaOut,
     LoginIn,
-    PasoLoginOut,
     SesionListadaOut,
     SesionOut,
     UsuarioOut,
-    VerificarMfaIn,
 )
 from .servicio import SesionActiva
 
@@ -50,26 +44,19 @@ def _salida(sesion: SesionActiva) -> SesionOut:
         expira_inactividad_en=sesion.expira_inactividad,
         expira_absoluta_en=sesion.expira_absoluta,
         inactividad_minutos=config.SESSION_IDLE_MINUTES,
-        codigos_recuperacion=list(sesion.codigos_recuperacion) if sesion.codigos_recuperacion else None,
-        codigos_restantes=sesion.codigos_restantes,
     )
 
 
-def _preauth(request: Request) -> tuple[str | None, str | None]:
-    return request.cookies.get(COOKIE_PREAUTH), request.headers.get(HEADER_CSRF)
-
-
 def _emitir(request: Request, sesion: SesionActiva) -> SesionOut:
-    """Segundo factor aprobado: recién ahora existe la cookie de sesión."""
+    """Contraseña correcta: recién ahora existe la cookie de sesión."""
     assert sesion.nuevo_token
     programar_cookie(request, COOKIE_SESION, sesion.nuevo_token)
-    programar_borrado(request, COOKIE_PREAUTH)
     return _salida(sesion)
 
 
-@router.post("/login", response_model=PasoLoginOut)
-def login(datos: LoginIn, request: Request, conn: AuthDb) -> PasoLoginOut:
-    """Primer paso: usuario y contraseña. Nunca dice cuál de los dos falló."""
+@router.post("/login", response_model=SesionOut)
+def login(datos: LoginIn, request: Request, conn: AuthDb) -> SesionOut:
+    """Usuario y contraseña. Nunca dice cuál de los dos falló."""
     ctx = ContextoPedido.de_request(request)
     if not servicio.origen_permitido(ctx.origen):
         auditoria.registrar(
@@ -77,38 +64,7 @@ def login(datos: LoginIn, request: Request, conn: AuthDb) -> PasoLoginOut:
             motivo="origen_login",
         )
         raise servicio.PedidoRechazado()
-    desafio = servicio.iniciar_login(conn, datos.usuario, datos.password, ctx)
-    programar_cookie(request, COOKIE_PREAUTH, desafio.token, max_age=config.PREAUTH_TTL_MINUTES * 60)
-    return PasoLoginOut(
-        paso="mfa" if desafio.proposito == "verificar" else "enrolar_mfa",
-        csrf=desafio.csrf,
-        expira_en=desafio.expira_en,
-    )
-
-
-@router.post("/mfa/totp/enrolar", response_model=EnrolamientoOut)
-def enrolar_totp(request: Request, conn: AuthDb) -> EnrolamientoOut:
-    """Primer ingreso sin segundo factor: el secreto para la app autenticadora."""
-    token, csrf = _preauth(request)
-    enrolamiento = servicio.iniciar_enrolamiento(conn, token, csrf, ContextoPedido.de_request(request))
-    return EnrolamientoOut(secreto=enrolamiento.secreto, uri=enrolamiento.uri, qr=enrolamiento.qr)
-
-
-@router.post("/mfa/totp/confirmar", response_model=SesionOut)
-def confirmar_totp(datos: CodigoTotpIn, request: Request, conn: AuthDb) -> SesionOut:
-    token, csrf = _preauth(request)
-    sesion = servicio.confirmar_enrolamiento(conn, token, csrf, datos.codigo, ContextoPedido.de_request(request))
-    return _emitir(request, sesion)
-
-
-@router.post("/mfa/verificar", response_model=SesionOut)
-def verificar_mfa(datos: VerificarMfaIn, request: Request, conn: AuthDb) -> SesionOut:
-    token, csrf = _preauth(request)
-    sesion = servicio.verificar_mfa(
-        conn, token, csrf, ContextoPedido.de_request(request),
-        codigo=datos.codigo, codigo_recuperacion=datos.codigo_recuperacion,
-    )
-    return _emitir(request, sesion)
+    return _emitir(request, servicio.iniciar_login(conn, datos.usuario, datos.password, ctx))
 
 
 @router.get("/sesion", response_model=SesionOut)
@@ -119,7 +75,6 @@ def sesion_vigente(sesion: Sesion) -> SesionOut:
 
 @router.post("/logout", status_code=204)
 def logout(request: Request, conn: AuthDb) -> Response:
-    programar_borrado(request, COOKIE_PREAUTH)
     try:
         sesion = validar(request, conn)
     except servicio.SesionInvalida:

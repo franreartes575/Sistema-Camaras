@@ -182,6 +182,7 @@ function Aplicacion() {
     time_limit_s: 5,
     max_stops_per_day: 5,
     min_stops_per_day: 0,
+    merge_clusters: true,
   });
   const [depots, setDepots] = useState<Depot[]>(loadDepots);
   const [preview, setPreview] = useState<ProcessResponse | null>(null);

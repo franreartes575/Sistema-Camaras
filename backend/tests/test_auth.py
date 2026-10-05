@@ -1,4 +1,4 @@
-"""Tests del login: contraseña, segundo factor, sesiones, bloqueo y auditoría.
+"""Tests del login: contraseña, sesiones, bloqueo y auditoría.
 
 Corren contra la app real (sin la sesión simulada del resto de la suite) y con
 un reloj controlado: vencimientos, bloqueos y rotaciones se prueban moviendo
@@ -12,9 +12,9 @@ import pytest
 from fastapi.testclient import TestClient
 
 from app import config
-from app.auth import auditoria, contrasenas, cripto, db, reloj, servicio, totp
+from app.auth import auditoria, contrasenas, cripto, db, reloj, servicio
 from app.auth.contexto import ContextoPedido
-from app.auth.dependencias import COOKIE_PREAUTH, COOKIE_SESION
+from app.auth.dependencias import COOKIE_SESION
 from app.main import app
 
 pytestmark = pytest.mark.auth_real
@@ -64,30 +64,12 @@ def login(c: TestClient, usuario: str = "jperez", password: str = PASSWORD):
     return c.post("/auth/login", json={"usuario": usuario, "password": password})
 
 
-def codigo(secreto: str, ahora: Reloj) -> str:
-    return totp.codigo(secreto, totp.paso(ahora()))
-
-
-def entrar_por_primera_vez(c: TestClient, ahora: Reloj, usuario: str = "jperez") -> tuple[str, dict]:
-    """Login + enrolamiento TOTP. Devuelve el secreto y la sesión."""
-    paso = login(c, usuario)
-    assert paso.status_code == 200, paso.text
-    csrf = paso.json()["csrf"]
-    secreto = c.post("/auth/mfa/totp/enrolar", headers={"X-CSRF-Token": csrf}).json()["secreto"]
-    sesion = c.post("/auth/mfa/totp/confirmar", json={"codigo": codigo(secreto, ahora)}, headers={"X-CSRF-Token": csrf})
-    assert sesion.status_code == 200, sesion.text
-    return secreto, sesion.json()
-
-
-def entrar(c: TestClient, secreto: str, ahora: Reloj, usuario: str = "jperez") -> dict:
-    """Login completo con un factor ya enrolado (avanza el reloj: un código
-    no se puede usar dos veces)."""
-    ahora.avanzar(seconds=31)
-    paso = login(c, usuario)
-    assert paso.status_code == 200, paso.text
-    respuesta = c.post(
-        "/auth/mfa/verificar", json={"codigo": codigo(secreto, ahora)}, headers={"X-CSRF-Token": paso.json()["csrf"]}
-    )
+def entrar(c: TestClient, ahora: Reloj | None = None, usuario: str = "jperez") -> dict:
+    """Login completo. Si se pasa el reloj lo avanza un segundo antes, para que
+    cada sesión tenga un último uso distinto (el tope descarta la menos usada)."""
+    if ahora is not None:
+        ahora.avanzar(seconds=1)
+    respuesta = login(c, usuario)
     assert respuesta.status_code == 200, respuesta.text
     return respuesta.json()
 
@@ -119,19 +101,36 @@ def set_cookies(respuesta) -> dict[str, str]:
 # --------------------------------------------------------------------------
 
 
-def test_password_correcta_abre_el_segundo_factor_sin_sesion(ahora) -> None:
+def test_password_correcta_abre_la_sesion(ahora) -> None:
     crear_usuario()
     c = cliente()
 
     respuesta = login(c)
 
     assert respuesta.status_code == 200
-    assert respuesta.json()["paso"] == "enrolar_mfa"
+    cuerpo = respuesta.json()
+    assert cuerpo["usuario"] == {"usuario": "jperez", "nombre": "Jperez", "rol": "operador"}
+    assert cuerpo["csrf"] and cuerpo["debe_cambiar_password"] is False
     cookies = set_cookies(respuesta)
-    assert set(cookies) == {COOKIE_PREAUTH}  # todavía no hay cookie de sesión
-    for atributo in ("HttpOnly", "Secure", "SameSite=strict", "Path=/", "Max-Age=300"):
-        assert atributo in cookies[COOKIE_PREAUTH]
-    assert c.get("/registro/planes/").status_code == 401
+    assert set(cookies) == {COOKIE_SESION}  # una sola cookie: no hay paso intermedio
+    for atributo in ("HttpOnly", "Secure", "SameSite=strict", "Path=/"):
+        assert atributo in cookies[COOKIE_SESION]
+    assert "Max-Age" not in cookies[COOKIE_SESION] and "Domain" not in cookies[COOKIE_SESION]  # __Host-
+    assert c.get("/auth/sesion").status_code == 200
+    assert c.get("/registro/planes/").status_code == 200
+
+
+def test_ya_no_existe_el_segundo_factor(ahora) -> None:
+    crear_usuario()
+    c = cliente()
+    sesion = entrar(c)
+    csrf = {"X-CSRF-Token": sesion["csrf"]}
+
+    for ruta in ("/auth/mfa/verificar", "/auth/mfa/totp/enrolar", "/auth/mfa/totp/confirmar"):
+        assert c.post(ruta, json={"codigo": "123456"}, headers=csrf).status_code in (404, 405)
+    assert "codigos_recuperacion" not in sesion and "codigos_restantes" not in sesion
+    assert "paso" not in sesion
+    assert "metodo_mfa" not in c.get("/auth/sesiones").json()[0]
 
 
 def test_usuario_inexistente_y_password_incorrecta_son_indistinguibles(ahora) -> None:
@@ -232,26 +231,11 @@ def test_cada_bloqueo_dura_el_doble_y_despues_es_permanente(ahora) -> None:
     assert login(cliente()).status_code == 200
 
 
-def test_el_segundo_factor_fallido_cuenta_para_el_bloqueo(ahora) -> None:
-    """Quien llega al código ya tiene la contraseña: tampoco puede probar sin límite."""
-    crear_usuario()
-    secreto, _ = entrar_por_primera_vez(cliente(), ahora)
-
-    for _ in range(5):
-        ahora.avanzar(seconds=31)
-        c = cliente()
-        csrf = login(c).json()["csrf"]
-        c.post("/auth/mfa/verificar", json={"codigo": "000000"}, headers={"X-CSRF-Token": csrf})
-
-    assert usuario_db()["bloqueado_hasta"] is not None
-    assert login(cliente()).status_code == 401
-
-
 def test_un_ingreso_completo_reinicia_los_contadores(ahora) -> None:
     crear_usuario()
     _fallar(4)
 
-    entrar_por_primera_vez(cliente(), ahora)
+    entrar(cliente())
 
     fila = usuario_db()
     assert (fila["intentos_fallidos"], fila["bloqueos_temporales"]) == (0, 0)
@@ -307,171 +291,7 @@ def test_pedidos_mal_formados_se_auditan_y_cuentan_por_ip(ahora, monkeypatch) ->
 
 
 # --------------------------------------------------------------------------
-# 3. Segundo factor (TOTP + códigos de recuperación)
-# --------------------------------------------------------------------------
-
-
-def test_enrolamiento_completo_emite_la_cookie_de_sesion(ahora) -> None:
-    crear_usuario()
-    c = cliente()
-    csrf = login(c).json()["csrf"]
-
-    enrolamiento = c.post("/auth/mfa/totp/enrolar", headers={"X-CSRF-Token": csrf}).json()
-    respuesta = c.post(
-        "/auth/mfa/totp/confirmar", json={"codigo": codigo(enrolamiento["secreto"], ahora)},
-        headers={"X-CSRF-Token": csrf},
-    )
-
-    assert respuesta.status_code == 200
-    assert enrolamiento["uri"].startswith("otpauth://totp/")
-    assert enrolamiento["qr"].startswith("data:image/svg+xml")
-    cookies = set_cookies(respuesta)
-    sesion = cookies[COOKIE_SESION]
-    for atributo in ("HttpOnly", "Secure", "SameSite=strict", "Path=/"):
-        assert atributo in sesion
-    assert "Max-Age" not in sesion and "Domain" not in sesion  # cookie de sesión, __Host-
-    assert "Max-Age=0" in cookies[COOKIE_PREAUTH]  # la de pre-autenticación se borra
-    codigos = respuesta.json()["codigos_recuperacion"]
-    assert len(codigos) == 10 and all(len(cod) == 14 and cod.count("-") == 2 for cod in codigos)
-    assert c.get("/registro/planes/").status_code == 200
-
-
-def test_el_secreto_se_repite_dentro_del_mismo_desafio(ahora) -> None:
-    crear_usuario()
-    c = cliente()
-    csrf = login(c).json()["csrf"]
-
-    primero = c.post("/auth/mfa/totp/enrolar", headers={"X-CSRF-Token": csrf}).json()["secreto"]
-    segundo = c.post("/auth/mfa/totp/enrolar", headers={"X-CSRF-Token": csrf}).json()["secreto"]
-
-    assert primero == segundo
-
-
-def test_el_secreto_totp_se_guarda_cifrado(ahora) -> None:
-    crear_usuario()
-    secreto, _ = entrar_por_primera_vez(cliente(), ahora)
-
-    conn = db.connect()
-    fila = conn.execute("SELECT * FROM factores_mfa").fetchone()
-    conn.close()
-
-    assert secreto not in fila["secreto_cifrado"]
-    assert cripto.descifrar(fila["secreto_cifrado"], f"usuario:{fila['usuario_id']}") == secreto
-    with pytest.raises(Exception):  # copiado a otro usuario no descifra
-        cripto.descifrar(fila["secreto_cifrado"], "usuario:999")
-
-
-def test_con_factor_enrolado_pide_el_codigo_y_no_permite_reenrolar(ahora) -> None:
-    crear_usuario()
-    entrar_por_primera_vez(cliente(), ahora)
-    c = cliente()
-
-    paso = login(c).json()
-
-    assert paso["paso"] == "mfa"
-    assert c.post("/auth/mfa/totp/enrolar", headers={"X-CSRF-Token": paso["csrf"]}).status_code == 403
-
-
-def test_un_codigo_totp_no_se_puede_usar_dos_veces(ahora) -> None:
-    crear_usuario()
-    secreto, _ = entrar_por_primera_vez(cliente(), ahora)
-    ahora.avanzar(seconds=31)
-    usado = codigo(secreto, ahora)
-    c1 = cliente()
-    csrf1 = login(c1).json()["csrf"]
-    assert c1.post("/auth/mfa/verificar", json={"codigo": usado}, headers={"X-CSRF-Token": csrf1}).status_code == 200
-
-    c2 = cliente()
-    csrf2 = login(c2).json()["csrf"]
-    respuesta = c2.post("/auth/mfa/verificar", json={"codigo": usado}, headers={"X-CSRF-Token": csrf2})
-
-    assert respuesta.status_code == 401
-    assert respuesta.json() == {"detail": "Código inválido."}
-
-
-def test_codigo_de_recuperacion_sirve_una_sola_vez(ahora) -> None:
-    crear_usuario()
-    _, sesion = entrar_por_primera_vez(cliente(), ahora)
-    recuperacion = sesion["codigos_recuperacion"][0]
-
-    def usar(texto: str):
-        c = cliente()
-        csrf = login(c).json()["csrf"]
-        return c.post("/auth/mfa/verificar", json={"codigo_recuperacion": texto}, headers={"X-CSRF-Token": csrf})
-
-    primera = usar(recuperacion.lower().replace("-", " "))  # tolera minúsculas y espacios
-    segunda = usar(recuperacion)
-
-    assert primera.status_code == 200
-    assert primera.json()["codigos_restantes"] == 9
-    assert segunda.status_code == 401
-
-
-def test_el_desafio_vence_a_los_cinco_minutos(ahora) -> None:
-    crear_usuario()
-    c = cliente()
-    csrf = login(c).json()["csrf"]
-    ahora.avanzar(minutes=5, seconds=1)
-
-    respuesta = c.post("/auth/mfa/totp/enrolar", headers={"X-CSRF-Token": csrf})
-
-    assert respuesta.status_code == 401
-    assert "venció" in respuesta.json()["detail"]
-
-
-def test_el_desafio_se_agota_y_no_acepta_ni_el_codigo_correcto(ahora, monkeypatch) -> None:
-    monkeypatch.setattr(config, "LOCKOUT_THRESHOLD", 100)  # aislar el tope del desafío
-    crear_usuario()
-    secreto, _ = entrar_por_primera_vez(cliente(), ahora)
-    ahora.avanzar(seconds=31)
-    c = cliente()
-    csrf = login(c).json()["csrf"]
-    respuestas = [
-        c.post("/auth/mfa/verificar", json={"codigo": "000000"}, headers={"X-CSRF-Token": csrf}).json()["detail"]
-        for _ in range(5)
-    ]
-
-    correcto = c.post("/auth/mfa/verificar", json={"codigo": codigo(secreto, ahora)}, headers={"X-CSRF-Token": csrf})
-
-    assert respuestas[:4] == ["Código inválido."] * 4
-    assert "venció" in respuestas[4]
-    assert correcto.status_code == 401
-    assert len(eventos(evento="mfa_desafio_agotado")) == 1
-
-
-def test_el_desafio_exige_el_token_csrf(ahora) -> None:
-    crear_usuario()
-    c = cliente()
-    login(c)
-
-    assert c.post("/auth/mfa/totp/enrolar").status_code == 403
-    assert c.post("/auth/mfa/totp/enrolar", headers={"X-CSRF-Token": "otro"}).status_code == 403
-    assert len(eventos(evento="csrf_rechazado")) == 2
-
-
-def test_el_desafio_queda_atado_al_navegador(ahora) -> None:
-    crear_usuario()
-    c = cliente()
-    csrf = login(c).json()["csrf"]
-    robada = cliente(ua="curl/8.0", cookies={COOKIE_PREAUTH: c.cookies[COOKIE_PREAUTH]})
-
-    assert robada.post("/auth/mfa/totp/enrolar", headers={"X-CSRF-Token": csrf}).status_code == 401
-    assert len(eventos(evento="desafio_otro_navegador")) == 1
-    # Y queda consumido: tampoco sirve ya en el navegador original.
-    assert c.post("/auth/mfa/totp/enrolar", headers={"X-CSRF-Token": csrf}).status_code == 401
-
-
-def test_un_login_nuevo_invalida_el_desafio_anterior(ahora) -> None:
-    crear_usuario()
-    viejo = cliente()
-    csrf_viejo = login(viejo).json()["csrf"]
-    login(cliente())
-
-    assert viejo.post("/auth/mfa/totp/enrolar", headers={"X-CSRF-Token": csrf_viejo}).status_code == 401
-
-
-# --------------------------------------------------------------------------
-# 4. Sesión: CSRF, rotación, vencimientos e invalidación desde el servidor
+# 3. Sesión: CSRF, rotación, vencimientos e invalidación desde el servidor
 # --------------------------------------------------------------------------
 
 
@@ -499,7 +319,7 @@ def test_todo_exige_sesion_salvo_health(ahora, metodo, ruta) -> None:
 def test_csrf_y_origen_en_pedidos_que_modifican(ahora) -> None:
     crear_usuario()
     c = cliente()
-    _, sesion = entrar_por_primera_vez(c, ahora)
+    sesion = entrar(c)
     csrf = {"X-CSRF-Token": sesion["csrf"]}
 
     sin_token = c.post("/auth/sesiones/cerrar-otras")
@@ -527,7 +347,7 @@ def test_login_desde_otro_origen_se_rechaza(ahora) -> None:
 def test_rotacion_del_token_y_deteccion_de_reuso(ahora) -> None:
     crear_usuario()
     c = cliente()
-    entrar_por_primera_vez(c, ahora)
+    entrar(c)
     viejo = c.cookies[COOKIE_SESION]
     ahora.avanzar(minutes=6)
 
@@ -547,7 +367,7 @@ def test_rotacion_del_token_y_deteccion_de_reuso(ahora) -> None:
 def test_la_inactividad_cierra_la_sesion(ahora) -> None:
     crear_usuario()
     c = cliente()
-    entrar_por_primera_vez(c, ahora)
+    entrar(c)
     ahora.avanzar(minutes=15)
 
     respuesta = c.get("/registro/planes/")
@@ -560,7 +380,7 @@ def test_la_inactividad_cierra_la_sesion(ahora) -> None:
 def test_la_actividad_mantiene_la_sesion_hasta_el_vencimiento_absoluto(ahora) -> None:
     crear_usuario()
     c = cliente()
-    entrar_por_primera_vez(c, ahora)
+    entrar(c)
 
     for _ in range(int(8 * 60 / 10) - 1):  # cada 10 min durante casi 8 h
         ahora.avanzar(minutes=10)
@@ -574,7 +394,7 @@ def test_la_actividad_mantiene_la_sesion_hasta_el_vencimiento_absoluto(ahora) ->
 def test_la_sesion_informa_sus_vencimientos(ahora) -> None:
     crear_usuario()
     c = cliente()
-    entrar_por_primera_vez(c, ahora)
+    entrar(c)
 
     sesion = c.get("/auth/sesion").json()
 
@@ -587,7 +407,7 @@ def test_la_sesion_informa_sus_vencimientos(ahora) -> None:
 def test_logout_invalida_la_cookie_en_el_servidor(ahora) -> None:
     crear_usuario()
     c = cliente()
-    _, sesion = entrar_por_primera_vez(c, ahora)
+    sesion = entrar(c)
     copia = c.cookies[COOKIE_SESION]
 
     respuesta = c.post("/auth/logout", headers={"X-CSRF-Token": sesion["csrf"]})
@@ -601,7 +421,7 @@ def test_logout_invalida_la_cookie_en_el_servidor(ahora) -> None:
 def test_revocacion_desde_el_servidor_es_inmediata(ahora) -> None:
     crear_usuario()
     c = cliente()
-    entrar_por_primera_vez(c, ahora)
+    entrar(c)
     assert c.get("/registro/planes/").status_code == 200
 
     conn = db.connect()
@@ -615,7 +435,7 @@ def test_revocacion_desde_el_servidor_es_inmediata(ahora) -> None:
 def test_la_cookie_copiada_a_otro_navegador_se_revoca(ahora) -> None:
     crear_usuario()
     c = cliente()
-    entrar_por_primera_vez(c, ahora)
+    entrar(c)
 
     robada = cliente(ua="Otro navegador", cookies={COOKIE_SESION: c.cookies[COOKIE_SESION]})
 
@@ -627,7 +447,7 @@ def test_la_cookie_copiada_a_otro_navegador_se_revoca(ahora) -> None:
 def test_cambio_de_ip_se_audita_sin_cortar_la_sesion(ahora) -> None:
     crear_usuario()
     c = cliente(ip="127.0.0.1")
-    entrar_por_primera_vez(c, ahora)
+    entrar(c)
 
     movida = cliente(ip="127.0.0.1", headers={"X-Forwarded-For": "203.0.113.50"}, cookies=dict(c.cookies))
 
@@ -638,10 +458,10 @@ def test_cambio_de_ip_se_audita_sin_cortar_la_sesion(ahora) -> None:
 def test_tope_de_sesiones_simultaneas(ahora) -> None:
     crear_usuario()
     primera = cliente()
-    secreto, _ = entrar_por_primera_vez(primera, ahora)
+    entrar(primera, ahora)
     otras = [cliente() for _ in range(3)]
     for c in otras:
-        entrar(c, secreto, ahora)
+        entrar(c, ahora)
 
     assert primera.get("/auth/sesion").status_code == 401  # la menos usada cayó
     assert all(c.get("/auth/sesion").status_code == 200 for c in otras)
@@ -650,9 +470,9 @@ def test_tope_de_sesiones_simultaneas(ahora) -> None:
 def test_listar_y_cerrar_sesiones_propias(ahora) -> None:
     crear_usuario()
     a = cliente()
-    secreto, sesion_a = entrar_por_primera_vez(a, ahora)
+    sesion_a = entrar(a, ahora)
     b = cliente()
-    entrar(b, secreto, ahora)
+    entrar(b, ahora)
 
     listado = a.get("/auth/sesiones").json()
     otra = next(s for s in listado if not s["actual"])
@@ -667,9 +487,9 @@ def test_listar_y_cerrar_sesiones_propias(ahora) -> None:
 def test_cambio_de_password_obligatorio_antes_de_usar_la_app(ahora) -> None:
     crear_usuario(debe_cambiar=True)
     a = cliente()
-    secreto, sesion = entrar_por_primera_vez(a, ahora)
+    sesion = entrar(a)
     b = cliente()
-    entrar(b, secreto, ahora)
+    entrar(b, ahora)
 
     bloqueada = a.get("/registro/planes/")
     debil = a.post(
@@ -694,7 +514,7 @@ def test_cambio_de_password_obligatorio_antes_de_usar_la_app(ahora) -> None:
 def test_cambio_de_password_con_la_actual_incorrecta_cuenta_para_el_bloqueo(ahora) -> None:
     crear_usuario()
     c = cliente()
-    _, sesion = entrar_por_primera_vez(c, ahora)
+    sesion = entrar(c)
 
     for _ in range(5):
         respuesta = c.post(
@@ -710,19 +530,19 @@ def test_auditoria_y_respaldo_solo_para_administradores(ahora) -> None:
     crear_usuario("jperez", "operador")
     crear_usuario("jefa", "admin")
     operador = cliente()
-    entrar_por_primera_vez(operador, ahora, "jperez")
+    entrar(operador, usuario="jperez")
     admin = cliente()
-    entrar_por_primera_vez(admin, ahora, "jefa")
+    entrar(admin, usuario="jefa")
 
     assert operador.get("/auth/auditoria").status_code == 403
     assert operador.get("/registro/respaldo").status_code == 403
     assert admin.get("/registro/respaldo").status_code == 200
     filas = admin.get("/auth/auditoria", params={"usuario": "jperez"}).json()
-    assert {f["evento"] for f in filas} >= {"usuario_creado", "password_ok", "mfa_enrolado", "sesion_iniciada"}
+    assert {f["evento"] for f in filas} >= {"usuario_creado", "password_ok", "sesion_iniciada"}
 
 
 # --------------------------------------------------------------------------
-# 5. Auditoría
+# 4. Auditoría
 # --------------------------------------------------------------------------
 
 
@@ -800,7 +620,7 @@ def test_exportar_la_auditoria_a_csv_neutraliza_formulas(ahora, tmp_path) -> Non
 
 
 # --------------------------------------------------------------------------
-# 6. Validación de entrada
+# 5. Validación de entrada
 # --------------------------------------------------------------------------
 
 
@@ -832,15 +652,6 @@ def test_json_invalido_y_cuerpo_gigante(ahora) -> None:
     assert gigante.status_code == 413
 
 
-@pytest.mark.parametrize(
-    "cuerpo",
-    [{"codigo": "12345a"}, {"codigo": "1234567"}, {}, {"codigo": "123456", "codigo_recuperacion": "AAAA-BBBB-CCCC"},
-     {"codigo_recuperacion": "AAAA-BBBB-CCC!"}],
-)
-def test_esquema_estricto_en_el_segundo_factor(ahora, cuerpo) -> None:
-    assert cliente().post("/auth/mfa/verificar", json=cuerpo).status_code == 422
-
-
 def test_politica_de_password_al_crear_usuarios() -> None:
     conn = db.connect()
     try:
@@ -854,7 +665,7 @@ def test_politica_de_password_al_crear_usuarios() -> None:
 
 
 # --------------------------------------------------------------------------
-# 7. Cabeceras y configuración segura por defecto
+# 6. Cabeceras y configuración segura por defecto
 # --------------------------------------------------------------------------
 
 
@@ -903,7 +714,7 @@ def test_rehash_al_entrar_si_cambiaron_los_parametros(ahora, monkeypatch) -> Non
 
 
 # --------------------------------------------------------------------------
-# 8. Administración (consola)
+# 7. Administración (consola)
 # --------------------------------------------------------------------------
 
 
@@ -929,21 +740,10 @@ def test_consola_crea_usuarios_y_los_lista(ahora, monkeypatch, capsys) -> None:
     assert eventos(evento="usuario_creado")[0]["user_agent"].startswith("cli:")
 
 
-def test_consola_resetear_mfa_obliga_a_enrolar_de_nuevo(ahora, monkeypatch, capsys) -> None:
-    crear_usuario()
-    c = cliente()
-    entrar_por_primera_vez(c, ahora)
-
-    _consola(monkeypatch, capsys, "resetear-mfa", "--usuario", "jperez")
-
-    assert c.get("/auth/sesion").status_code == 401  # sus sesiones se cerraron
-    assert login(cliente()).json()["paso"] == "enrolar_mfa"
-
-
 def test_consola_deshabilitar_y_habilitar(ahora, monkeypatch, capsys) -> None:
     crear_usuario()
     c = cliente()
-    entrar_por_primera_vez(c, ahora)
+    entrar(c)
 
     _consola(monkeypatch, capsys, "deshabilitar", "--usuario", "jperez")
     deshabilitado = login(cliente()).status_code
@@ -957,14 +757,12 @@ def test_consola_deshabilitar_y_habilitar(ahora, monkeypatch, capsys) -> None:
 
 def test_consola_password_provisoria_obliga_a_cambiarla(ahora, monkeypatch, capsys) -> None:
     crear_usuario()
-    secreto, _ = entrar_por_primera_vez(cliente(), ahora)
+    entrar(cliente())
 
     _consola(monkeypatch, capsys, "resetear-password", "--usuario", "jperez",
              passwords=("provisoria muy larga 2026",) * 2)
     c = cliente()
-    ahora.avanzar(seconds=31)
-    csrf = login(c, password="provisoria muy larga 2026").json()["csrf"]
-    sesion = c.post("/auth/mfa/verificar", json={"codigo": codigo(secreto, ahora)}, headers={"X-CSRF-Token": csrf}).json()
+    sesion = login(c, password="provisoria muy larga 2026").json()
 
     assert sesion["debe_cambiar_password"] is True
     assert c.get("/registro/planes/").status_code == 403
@@ -1018,7 +816,7 @@ def test_consola_inicializar_crea_la_clave_una_sola_vez(monkeypatch, capsys, tmp
 def test_auditoria_filtrada_por_fecha(ahora) -> None:
     crear_usuario("jefa", "admin")
     admin = cliente()
-    entrar_por_primera_vez(admin, ahora, "jefa")
+    entrar(admin, usuario="jefa")
     ahora.avanzar(minutes=10)  # dentro de la ventana de inactividad
     login(cliente(), "x", "y")
 

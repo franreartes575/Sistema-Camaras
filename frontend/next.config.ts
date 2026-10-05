@@ -18,7 +18,8 @@ const BACKEND_URL = (
 const SECURITY_HEADERS = [
   { key: "X-Frame-Options", value: "DENY" },
   { key: "X-Content-Type-Options", value: "nosniff" },
-  { key: "Referrer-Policy", value: "no-referrer" },
+  // OpenStreetMap bloquea (403) los tiles sin Referer; así sólo recibe el origen.
+  { key: "Referrer-Policy", value: "strict-origin-when-cross-origin" },
   { key: "Cross-Origin-Opener-Policy", value: "same-origin" },
   { key: "Permissions-Policy", value: "camera=(), microphone=(), geolocation=(), payment=(), usb=()" },
 ];
@@ -28,6 +29,9 @@ const nextConfig: NextConfig = {
   // El backend usa rutas con barra final (/upload-excel/): sin esto, Next
   // las redirigiría sin la barra y FastAPI las volvería a redirigir.
   skipTrailingSlashRedirect: true,
+  // /optimize/ corre OR-Tools hasta time_limit_s (máx. 60 s) por cada cluster;
+  // el proxy de Next corta a los 30 s por defecto y devuelve un 500.
+  experimental: { proxyTimeout: 10 * 60 * 1000 },
   async rewrites() {
     return [
       // Primero la variante con barra final: `:path*` la descarta, y sin ella

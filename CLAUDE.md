@@ -118,7 +118,7 @@ endpoints del planificador: el frontend guarda el plan llamando a
 ### Autenticación (`app/auth/`)
 
 Modelo: sesiones opacas de servidor (no JWT, para poder revocarlas al
-instante), contraseña Argon2id + TOTP obligatorio, auditoría de sólo agregado.
+instante), contraseña Argon2id (sin segundo factor), auditoría de sólo agregado.
 Todo endpoint que no sea `/auth/*` ni `/health` depende de `requiere_sesion`
 (`dependencias.py`); los de administración, de `requiere_admin`. Un endpoint
 nuevo tiene que llevarla: en `main.py` va en `dependencies=[...]`, y los
@@ -229,9 +229,19 @@ que react-map-gl haya declarado soporte.
 sincrónicos. Se despachan con `anyio.to_thread.run_sync()`. Sin eso, un request
 con varios clusters congela el event loop y con él todo el servidor.
 
+### Los clusters con la misma sede se resuelven juntos
+
+`_solve_routes` agrupa los clusters por punto de partida (`_group_clusters_by_start`)
+cuando `merge_clusters` está activo, y resuelve cada grupo como un solo problema
+de ruteo: una jornada puede mezclar cámaras de varios clusters, y `ClusterRoute.cluster_ids`
+los lista (`cluster_id` es el menor). Un vehículo sale y vuelve a una sola sede, por eso
+sedes distintas nunca comparten día. La API lo deja apagado por defecto (conserva el
+comportamiento anterior); el frontend lo manda activado. El frontend renumera
+`vehicle_day` de corrido en todo el plan (`optimize()` en `lib/api.ts`).
+
 ### `--max-table-size` de OSRM debe coincidir
 
-`OSRM_MAX_TABLE_SIZE` en `routing.py` (100) tiene que ser igual al flag del
+`OSRM_MAX_TABLE_SIZE` en `routing.py` (1000) tiene que ser igual al flag del
 `docker-compose.yml`. Para clusters más grandes hay que subir **los dos**; el
 costo de la matriz crece al cuadrado.
 
@@ -331,8 +341,8 @@ recorridos quedarían de un píxel.
   creó porque el 8000 quedó retenido por un socket huérfano; se libera al
   reiniciar Windows, y ahí conviene borrar el archivo.
 - `backend/data/seguridad.db` (usuarios, sesiones, auditoría) y
-  `backend/data/clave_maestra.key`. **Perder la clave deja inservibles los
-  segundos factores y la verificación de la auditoría**: respaldala aparte.
+  `backend/data/clave_maestra.key`. **Perder la clave deja inservible la
+  verificación de la auditoría**: respaldala aparte.
 - `osrm/data/` pesa cientos de MB y está ignorado por git: se reconstruye con
   `preparar.ps1`.
 - `backend/data/recorridos.db` es la base del registro (más sus `-wal` y

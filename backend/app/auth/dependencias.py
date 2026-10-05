@@ -25,7 +25,6 @@ from .servicio import ErrorAuth, SesionActiva
 # __Host-: el navegador sólo la acepta con Secure, Path=/ y sin Domain, así
 # que ningún subdominio puede pisarla ni leerla.
 COOKIE_SESION = "__Host-sid"
-COOKIE_PREAUTH = "__Host-preauth"
 HEADER_CSRF = "x-csrf-token"
 # Los pedidos de /auth son JSON chicos; un cuerpo grande sólo puede ser abuso.
 MAX_AUTH_BODY = 8 * 1024

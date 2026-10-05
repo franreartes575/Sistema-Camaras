@@ -617,3 +617,55 @@ def test_optimize_tope_cero_es_sin_limite(client: TestClient, planilla: bytes) -
     body = optimizar(client, planilla, max_stops_per_day=0).json()
 
     assert len(body["routes"]) == 2
+
+
+def test_optimize_junta_clusters_con_la_misma_sede_en_una_jornada(
+    client: TestClient, planilla: bytes
+) -> None:
+    """Dos zonas con la misma sede caben en un día: una sola jornada con las ocho."""
+    body = optimizar(client, planilla, merge_clusters=True).json()
+
+    assert len(body["routes"]) == 1
+    ruta = body["routes"][0]
+    assert ruta["cluster_ids"] == [0, 1]
+    assert ruta["cluster_id"] == 0
+    assert ruta["stop_count"] == 8
+
+
+def test_optimize_sin_juntar_clusters_mantiene_una_ruta_por_cluster(
+    client: TestClient, planilla: bytes
+) -> None:
+    """Sin la opción, cada cluster sigue con sus propias jornadas."""
+    body = optimizar(client, planilla, merge_clusters=False).json()
+
+    assert [route["cluster_ids"] for route in body["routes"]] == [[0], [1]]
+
+
+def test_optimize_no_junta_clusters_con_sedes_distintas(
+    client: TestClient, planilla: bytes
+) -> None:
+    """Un vehículo sale de una sola sede: sedes distintas nunca comparten día."""
+    sedes = json.dumps(
+        {
+            "0": {"lat": -34.6000, "lon": -58.3816, "name": "Sede A"},
+            "1": {"lat": -34.5780, "lon": -58.4300, "name": "Sede B"},
+        }
+    )
+    body = optimizar(
+        client, planilla, merge_clusters=True, cluster_starts_json=sedes
+    ).json()
+
+    assert len(body["routes"]) == 2
+    assert all(len(route["cluster_ids"]) == 1 for route in body["routes"])
+
+
+def test_optimize_junta_clusters_respetando_el_tope_por_dia(
+    client: TestClient, planilla: bytes
+) -> None:
+    """Con tope 4 y las dos zonas juntas salen dos jornadas llenas, sin perder cámaras."""
+    body = optimizar(client, planilla, merge_clusters=True, max_stops_per_day=4).json()
+
+    assert all(route["stop_count"] <= 4 for route in body["routes"])
+    assert all(route["cluster_ids"] == [0, 1] for route in body["routes"])
+    camaras = {stop["camera_id"] for route in body["routes"] for stop in route["stops"]}
+    assert len(camaras) == 8

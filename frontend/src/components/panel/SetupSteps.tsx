@@ -7,7 +7,7 @@
 
 import DepotEditor from "@/components/DepotEditor";
 import CoordinateField from "@/components/ui/CoordinateField";
-import { BUTTON, Notice, Select, Slider } from "@/components/ui/controls";
+import { BUTTON, Notice, Select, Slider, Toggle } from "@/components/ui/controls";
 import IntegerField from "@/components/ui/IntegerField";
 import type {
   Cluster,
@@ -91,50 +91,65 @@ export function ClusterStep({
 
 // ---------------------------------------------------------------- Paso 3
 
-function ClusterStartRow({
-  cluster,
-  depots,
+const SELECT_CLASS =
+  "w-full rounded-md border border-slate-700 bg-slate-950 px-2 py-1.5 text-sm text-slate-100 focus:border-sky-400 focus:outline-none";
+
+function sameStart(a: ClusterStart | undefined, b: ClusterStart | undefined): boolean {
+  if (!a || !b) return a === b;
+  return a.lat === b.lat && a.lon === b.lon && a.name === b.name;
+}
+
+/**
+ * Elige un punto de partida: una sede guardada o coordenadas sueltas.
+ * `fallback` son las coordenadas con que arranca la opción personalizada.
+ * `mixed` marca que no hay un único valor (la salida general cuando cada
+ * cluster tiene la suya).
+ */
+function StartPicker({
+  label,
   start,
+  depots,
+  fallback,
+  mixed = false,
   onChange,
 }: {
-  cluster: Cluster;
-  depots: Depot[];
+  label: string;
   start: ClusterStart | undefined;
+  depots: Depot[];
+  fallback: ClusterStart;
+  mixed?: boolean;
   onChange: (start: ClusterStart) => void;
 }) {
   const matchedDepot = depots.find(
     (depot) =>
       start && depot.lat === start.lat && depot.lon === start.lon && depot.name === start.name,
   );
-  const mode = start === undefined ? "" : matchedDepot ? matchedDepot.id : "custom";
-  const coordInput =
-    "w-full rounded-md border border-slate-700 bg-slate-950 px-2 py-1.5 text-sm text-slate-100 focus:border-sky-400 focus:outline-none";
+  const mode = mixed ? "mixed" : start === undefined ? "" : matchedDepot ? matchedDepot.id : "custom";
 
   return (
-    <li className="space-y-2 rounded-lg bg-slate-900 p-3">
-      <div className="flex items-baseline justify-between gap-2 text-xs">
-        <span className="font-semibold text-slate-100">Cluster {cluster.id}</span>
-        <span className="text-slate-500">
-          {cluster.size} cámaras · radio {cluster.radius_km.toFixed(1)} km
-        </span>
-      </div>
+    <>
       <select
         value={mode}
-        aria-label={`Punto de partida del cluster ${cluster.id}`}
+        aria-label={label}
         onChange={(event) => {
           const value = event.target.value;
           if (value === "custom") {
-            onChange({ lat: cluster.centroid_lat, lon: cluster.centroid_lon, name: null });
+            onChange(fallback);
             return;
           }
           const depot = depots.find((candidate) => candidate.id === value);
           if (depot) onChange({ lat: depot.lat, lon: depot.lon, name: depot.name });
         }}
-        className={coordInput}
+        className={SELECT_CLASS}
       >
         <option value="" disabled>
           — elegir punto de partida —
         </option>
+        {mixed && (
+          <option value="mixed" disabled>
+            Distinta en cada cluster
+          </option>
+        )}
         {depots.map((depot) => (
           <option key={depot.id} value={depot.id}>
             {depot.name || "Sede sin nombre"}
@@ -149,6 +164,36 @@ function ClusterStartRow({
           onChange={(coords) => onChange({ ...start, ...coords })}
         />
       )}
+    </>
+  );
+}
+
+function ClusterStartRow({
+  cluster,
+  depots,
+  start,
+  onChange,
+}: {
+  cluster: Cluster;
+  depots: Depot[];
+  start: ClusterStart | undefined;
+  onChange: (start: ClusterStart) => void;
+}) {
+  return (
+    <li className="space-y-2 rounded-lg bg-slate-900 p-3">
+      <div className="flex items-baseline justify-between gap-2 text-xs">
+        <span className="font-semibold text-slate-100">Cluster {cluster.id}</span>
+        <span className="text-slate-500">
+          {cluster.size} cámaras · radio {cluster.radius_km.toFixed(1)} km
+        </span>
+      </div>
+      <StartPicker
+        label={`Punto de partida del cluster ${cluster.id}`}
+        start={start}
+        depots={depots}
+        fallback={{ lat: cluster.centroid_lat, lon: cluster.centroid_lon, name: null }}
+        onChange={onChange}
+      />
     </li>
   );
 }
@@ -166,22 +211,55 @@ export function StartsStep({
   onDepotsChange: (depots: Depot[]) => void;
   onClusterStartsChange: (starts: Record<number, ClusterStart>) => void;
 }) {
+  const { clusters } = preview;
+  // Salida general: lo que comparten todos los clusters. Si difieren, se
+  // muestra como "distinta en cada cluster" y elegir una la pisa en todos.
+  const sample = clusters.length > 0 ? clusterStarts[clusters[0].id] : undefined;
+  const allSame = clusters.every((cluster) => sameStart(clusterStarts[cluster.id], sample));
+  const mixed = !allSame && clusters.some((cluster) => clusterStarts[cluster.id] !== undefined);
+  const biggest = clusters.reduce((a, b) => (b.size > a.size ? b : a), clusters[0]);
+
   return (
     <>
-      {preview.clusters.length === 0 ? (
+      {clusters.length === 0 ? (
         <Notice tone="warn">No se formó ningún cluster con estos parámetros.</Notice>
       ) : (
-        <ul className="space-y-2">
-          {preview.clusters.map((cluster) => (
-            <ClusterStartRow
-              key={cluster.id}
-              cluster={cluster}
-              depots={depots}
-              start={clusterStarts[cluster.id]}
-              onChange={(start) => onClusterStartsChange({ ...clusterStarts, [cluster.id]: start })}
-            />
-          ))}
-        </ul>
+        <>
+          {clusters.length > 1 && (
+            <div className="space-y-2 rounded-lg border border-sky-500/30 bg-sky-500/5 p-3">
+              <div className="text-xs font-semibold text-slate-100">Salida general</div>
+              <p className="text-xs leading-relaxed text-slate-400">
+                Se aplica a todos los clusters. Después podés cambiar la de uno solo.
+              </p>
+              <StartPicker
+                label="Punto de partida general"
+                start={allSame ? sample : undefined}
+                depots={depots}
+                fallback={{ lat: biggest.centroid_lat, lon: biggest.centroid_lon, name: null }}
+                mixed={mixed}
+                onChange={(start) =>
+                  onClusterStartsChange(
+                    Object.fromEntries(clusters.map((cluster) => [cluster.id, start])) as Record<
+                      number,
+                      ClusterStart
+                    >,
+                  )
+                }
+              />
+            </div>
+          )}
+          <ul className="space-y-2">
+            {clusters.map((cluster) => (
+              <ClusterStartRow
+                key={cluster.id}
+                cluster={cluster}
+                depots={depots}
+                start={clusterStarts[cluster.id]}
+                onChange={(start) => onClusterStartsChange({ ...clusterStarts, [cluster.id]: start })}
+              />
+            ))}
+          </ul>
+        </>
       )}
       <DepotEditor depots={depots} onChange={onDepotsChange} />
     </>
@@ -250,6 +328,15 @@ export function RulesStep({
       <p className="-mt-1 text-xs leading-relaxed text-slate-500">
         Con mínimo y máximo iguales, cada día lleva exactamente esa cantidad. El
         día con menos cámaras queda siempre último, para sumarle pendientes.
+      </p>
+      <Toggle
+        label="Juntar clusters con la misma salida en un mismo día"
+        checked={routing.merge_clusters}
+        onChange={(merge_clusters) => onRoutingChange({ ...routing, merge_clusters })}
+      />
+      <p className="-mt-1 text-xs leading-relaxed text-slate-500">
+        Sólo se juntan los clusters que comparten el punto de partida, y si entran
+        en la jornada. Evita días casi vacíos por clusters chicos.
       </p>
       <Slider
         label="Tiempo por cámara"

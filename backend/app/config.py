@@ -78,14 +78,13 @@ TRUSTED_PROXIES: list[str] = _csv("TRUSTED_PROXIES", "127.0.0.1/32,::1/128")
 # Autenticación
 # --------------------------------------------------------------------------
 
-# Base de seguridad: usuarios, factores MFA, sesiones y auditoría. Separada de
+# Base de seguridad: usuarios, sesiones y auditoría. Separada de
 # la del registro a propósito: el respaldo del registro no debe llevarse hashes
 # de contraseñas ni la auditoría.
 AUTH_DB_PATH: str = os.getenv("AUTH_DB_PATH", str(_DATA_DIR / "seguridad.db"))
 
 # Clave maestra (32 bytes en base64) de la que se derivan las claves para
-# cifrar los secretos TOTP, firmar la cadena de auditoría y los códigos de
-# recuperación. Por variable de entorno, o en un archivo que crea
+# firmar la cadena de auditoría. Por variable de entorno, o en un archivo que crea
 # `python -m app.auth.cli inicializar`. Sin clave el backend no arranca.
 AUTH_MASTER_KEY: str = os.getenv("AUTH_MASTER_KEY", "")
 AUTH_MASTER_KEY_FILE: str = os.getenv(
@@ -107,10 +106,6 @@ SESSION_BIND_USER_AGENT: bool = os.getenv("SESSION_BIND_USER_AGENT", "1").lower(
     "1", "true", "yes",
 )
 
-# Entre la contraseña y el segundo factor: cuánto dura y cuántos códigos admite.
-PREAUTH_TTL_MINUTES: int = _int("PREAUTH_TTL_MINUTES", 5)
-MFA_MAX_ATTEMPTS: int = _int("MFA_MAX_ATTEMPTS", 5)
-
 # Bloqueo de cuenta: LOCKOUT_THRESHOLD fallos seguidos bloquean
 # LOCKOUT_BASE_MINUTES, el doble cada vez; al bloqueo número
 # LOCKOUT_MAX_TEMPORARY + 1 la cuenta queda bloqueada hasta que la desbloquee
@@ -127,4 +122,3 @@ LOGIN_MAX_FAILURES_PER_IP: int = _int("LOGIN_MAX_FAILURES_PER_IP", 20)
 LOGIN_MAX_FAILURES_PER_USER: int = _int("LOGIN_MAX_FAILURES_PER_USER", 10)
 
 PASSWORD_MIN_LENGTH: int = _int("PASSWORD_MIN_LENGTH", 14)
-TOTP_ISSUER: str = os.getenv("TOTP_ISSUER", "Recorridos Camaras")
