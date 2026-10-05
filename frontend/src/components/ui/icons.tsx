@@ -235,3 +235,40 @@ export function IconLogout(props: IconProps) {
     </Svg>
   );
 }
+
+export function IconHome(props: IconProps) {
+  return (
+    <Svg {...props}>
+      <path d="M4 10.5 12 4l8 6.5" />
+      <path d="M6 9v10.5h4.5v-5h3v5H18V9" />
+    </Svg>
+  );
+}
+
+export function IconCopy(props: IconProps) {
+  return (
+    <Svg {...props}>
+      <rect x="8.5" y="8.5" width="11" height="11" rx="2" />
+      <path d="M15.5 8.5V6.5a2 2 0 0 0-2-2h-7a2 2 0 0 0-2 2v7a2 2 0 0 0 2 2h2" />
+    </Svg>
+  );
+}
+
+export function IconClipboard(props: IconProps) {
+  return (
+    <Svg {...props}>
+      <rect x="5.5" y="5" width="13" height="15.5" rx="2" />
+      <path d="M9 5V4a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v1" />
+      <path d="M9 11h6M9 15h4" />
+    </Svg>
+  );
+}
+
+export function IconCamera(props: IconProps) {
+  return (
+    <Svg {...props}>
+      <path d="M3.5 8.5h10l4-2.5v8l-4-2.5h-10z" />
+      <path d="M7 12v4.5M5 18.5h4" />
+    </Svg>
+  );
+}

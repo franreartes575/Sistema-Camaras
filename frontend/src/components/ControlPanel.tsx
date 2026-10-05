@@ -10,7 +10,7 @@
 
 import { useState } from "react";
 
-import FileStep from "@/components/panel/FileStep";
+import FileStep, { type CatalogInput, type InputMode } from "@/components/panel/FileStep";
 import PlanStep from "@/components/panel/PlanStep";
 import { ClusterStep, RulesStep, StartsStep } from "@/components/panel/SetupSteps";
 import { Notice } from "@/components/ui/controls";
@@ -57,7 +57,12 @@ type Props = {
   onMappingChange: (mapping: ColumnMapping) => void;
   onParamsChange: (params: ClusterParams) => void;
   onRoutingChange: (routing: RouteParams) => void;
-  onDepotsChange: (depots: Depot[]) => void;
+  /** Sólo los administradores cambian las sedes. */
+  canEditDepots: boolean;
+  onDepotsChanged: () => void;
+  inputMode: InputMode;
+  catalog: CatalogInput;
+  onInputModeChange: (mode: InputMode) => void;
   onClusterStartsChange: (starts: Record<number, ClusterStart>) => void;
   onPreview: () => void;
   onOptimize: () => void;
@@ -130,16 +135,25 @@ export default function ControlPanel(props: Props) {
 
       <Step
         number={1}
-        title="Planilla"
+        title="Cámaras"
         icon={<IconSheet />}
-        summary={upload ? `${upload.filename}${mapping.col_done ? " · seguimiento" : ""}` : undefined}
+        summary={
+          !upload
+            ? undefined
+            : props.catalog.plannedCount !== null
+              ? `${props.catalog.plannedCount} cámara(s) del catálogo`
+              : `${upload.filename}${mapping.col_done ? " · seguimiento" : ""}`
+        }
         {...stepProps("file")}
       >
         <FileStep
           upload={upload}
           mapping={mapping}
-          isLoading={isLoading && !upload}
+          isLoading={isLoading}
           registroSync={props.registroSync}
+          inputMode={props.inputMode}
+          catalog={props.catalog}
+          onInputModeChange={props.onInputModeChange}
           onFile={props.onFile}
           onMappingChange={props.onMappingChange}
           onOpenRegistry={props.onOpenRegistry}
@@ -150,7 +164,7 @@ export default function ControlPanel(props: Props) {
         number={2}
         title="Agrupar cámaras"
         icon={<IconLayers />}
-        lockedHint="Primero subí la planilla y elegí las columnas."
+        lockedHint="Primero elegí las cámaras del catálogo o subí una planilla."
         summary={
           preview
             ? `${preview.stats.valid_rows} cámaras · ${preview.stats.cluster_count} cluster(s)` +
@@ -180,9 +194,10 @@ export default function ControlPanel(props: Props) {
         {preview && (
           <StartsStep
             depots={props.depots}
+            canEditDepots={props.canEditDepots}
             preview={preview}
             clusterStarts={clusterStarts}
-            onDepotsChange={props.onDepotsChange}
+            onDepotsChanged={props.onDepotsChanged}
             onClusterStartsChange={props.onClusterStartsChange}
           />
         )}

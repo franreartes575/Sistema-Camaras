@@ -88,3 +88,30 @@ export const PENDING_RING = "#334155";
 /** Línea de los recorridos del registro; la jornada enfocada pasa a SERIES_SELECTED. */
 export const ROUTE_LINE = SERIES_BASE;
 export const ROUTE_LINE_FOCUS = SERIES_SELECTED;
+
+/**
+ * Color de cada cluster en el mapa del Inicio. Es la excepción a la regla de
+ * arriba: ahí se pide distinguir clusters a simple vista, con todo el catálogo
+ * a la vista. Son los mismos cinco colores validados de DAY_PALETTE (el máximo
+ * que pasa contra el tile comparando todos los pares; el par verde/rojo queda
+ * en la banda 6–8 de daltonismo, legal sólo con codificación secundaria). Con
+ * más clusters que colores el backend (`assign_colors`) reparte los índices
+ * para que los cercanos no se repitan, y la identidad la lleva el rótulo
+ * "C n" en el centro de cada uno.
+ */
+export const CLUSTER_PALETTE = DAY_PALETTE;
+
+/** Expresión MapLibre: color según la propiedad `color` (índice); -1 = suelta. */
+export const CLUSTER_COLOR_EXPRESSION = [
+  "match",
+  ["get", "color"],
+  ...CLUSTER_PALETTE.flatMap((color, index) => [index, color]),
+  NOISE_INK,
+];
+
+/**
+ * Barras de magnitud de una sola serie sobre el panel oscuro (slate-900).
+ * Validada con el script de la skill dataviz: dentro de la banda de
+ * luminosidad del modo oscuro y por encima de 3:1 contra el panel.
+ */
+export const PANEL_BAR = "#3b8fe0";

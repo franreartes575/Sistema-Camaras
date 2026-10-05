@@ -1,13 +1,22 @@
 "use client";
 
 import dynamic from "next/dynamic";
-import { useCallback, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 
 import AuthGate, { useAuth } from "@/components/auth/AuthGate";
 import ControlPanel, { type RegistroSync } from "@/components/ControlPanel";
-import { loadDepots } from "@/components/DepotEditor";
+import InicioView from "@/components/inicio/InicioView";
+import type { InputMode } from "@/components/panel/FileStep";
 import RegistroView from "@/components/registro/RegistroView";
-import { IconCalendar, IconDatabase, IconList, IconLogout, IconMap, IconRoute } from "@/components/ui/icons";
+import {
+  IconCalendar,
+  IconDatabase,
+  IconHome,
+  IconList,
+  IconLogout,
+  IconMap,
+  IconRoute,
+} from "@/components/ui/icons";
 import {
   exportPlan,
   optimize,
@@ -23,6 +32,13 @@ import {
   type RouteParams,
   type UploadExcelResponse,
 } from "@/lib/api";
+import {
+  catalogPaths,
+  legacyDepots,
+  migrateLegacyDepots,
+  selectionWorkbook,
+  type CatalogCamera,
+} from "@/lib/catalogo";
 import { downloadBlob } from "@/lib/download";
 import { assignRouteDates, firstWorkingDay, routeKey, todayIso } from "@/lib/planDates";
 import {
@@ -32,6 +48,7 @@ import {
   type PlanSummary,
   type RegistryPlanIn,
 } from "@/lib/registro";
+import { useJson } from "@/lib/useJson";
 
 // MapLibre toca `window`, asi que el mapa se carga solo en el cliente.
 const MapView = dynamic(() => import("@/components/MapView"), {
@@ -57,7 +74,9 @@ const EMPTY_MAPPING: ColumnMapping = {
 };
 
 type MobileView = "panel" | "map";
-type Section = "plan" | "registro";
+type Section = "inicio" | "plan" | "registro";
+/** De dónde salió la planilla del paso 1. */
+type FileOrigin = "usuario" | "registro" | "catalogo";
 
 /**
  * Último plan guardado en el registro: de qué planilla y resultado salió y con
@@ -165,7 +184,10 @@ export default function Home() {
 }
 
 function Aplicacion() {
+  const { session } = useAuth();
+  const isAdmin = session.usuario.rol === "admin";
   const [file, setFile] = useState<File | null>(null);
+  const [fileOrigin, setFileOrigin] = useState<FileOrigin | null>(null);
   const [upload, setUpload] = useState<UploadExcelResponse | null>(null);
   const [mapping, setMapping] = useState<ColumnMapping>(EMPTY_MAPPING);
   // 5 km agrupa una ciudad entera; con 1 km casi nada llega a formar grupo.
@@ -184,7 +206,15 @@ function Aplicacion() {
     min_stops_per_day: 0,
     merge_clusters: true,
   });
-  const [depots, setDepots] = useState<Depot[]>(loadDepots);
+  // Se incrementa cuando cambia el catálogo o las sedes (importar, editar).
+  const [catalogVersion, setCatalogVersion] = useState(0);
+  const bumpCatalog = useCallback(() => setCatalogVersion((version) => version + 1), []);
+  const [inputMode, setInputMode] = useState<InputMode>("catalogo");
+  // Cámaras del catálogo elegidas para planificar (en el orden en que se eligieron).
+  const [catalogSelection, setCatalogSelection] = useState<string[]>([]);
+  const [legacyNotice, setLegacyNotice] = useState<string | null>(null);
+  // Cuántas cámaras llevaba la planilla armada desde el catálogo.
+  const [plannedFromCatalog, setPlannedFromCatalog] = useState<number | null>(null);
   const [preview, setPreview] = useState<ProcessResponse | null>(null);
   const [clusterStarts, setClusterStarts] = useState<Record<number, ClusterStart>>({});
   const [result, setResult] = useState<OptimizeResponse | null>(null);
@@ -199,7 +229,7 @@ function Aplicacion() {
   const [isExporting, setIsExporting] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [mobileView, setMobileView] = useState<MobileView>("panel");
-  const [section, setSection] = useState<Section>("plan");
+  const [section, setSection] = useState<Section>("inicio");
   // El registro se monta la primera vez que se abre y después queda montado
   // (oculto) para no perder sus filtros ni su selección al ir y volver.
   const [registroOpened, setRegistroOpened] = useState(false);
@@ -210,6 +240,40 @@ function Aplicacion() {
   const [registroNotice, setRegistroNotice] = useState<{ tone: "warn" | "error"; text: string } | null>(null);
   const [registroSync, setRegistroSync] = useState<RegistroSync | null>(null);
 
+  // El catálogo y las sedes se leen una vez acá y los comparten el Inicio y
+  // el paso 1. La última visita de cada cámara sale del registro: también se
+  // vuelve a leer cuando cambia el registro.
+  const camerasState = useJson<CatalogCamera[]>(catalogPaths.cameras, catalogVersion + registroVersion);
+  const depotsState = useJson<Depot[]>(catalogPaths.depots, catalogVersion);
+  const depots = useMemo(() => depotsState.data ?? [], [depotsState.data]);
+
+  // Las sedes antes vivían sólo en el navegador: la primera vez que entra un
+  // administrador con el servidor sin sedes, se suben y se borran de acá.
+  const serverHasNoDepots = depotsState.data !== null && depotsState.data.length === 0;
+  useEffect(() => {
+    if (!serverHasNoDepots) return;
+    const legacy = legacyDepots();
+    if (legacy.length === 0) return;
+    if (!isAdmin) {
+      const timer = window.setTimeout(
+        () =>
+          setLegacyNotice(
+            `Este navegador tiene ${legacy.length} sede(s) guardadas de antes. Para pasarlas al servidor, ` +
+              "un administrador tiene que entrar una vez desde este mismo navegador.",
+          ),
+        0,
+      );
+      return () => window.clearTimeout(timer);
+    }
+    migrateLegacyDepots(legacy).then(
+      (created) => {
+        setLegacyNotice(`Se pasaron al servidor ${created} sede(s) que estaban guardadas en este navegador.`);
+        bumpCatalog();
+      },
+      (err: unknown) => setLegacyNotice(`No se pudieron pasar las sedes del navegador: ${errorMessage(err)}`),
+    );
+  }, [serverHasNoDepots, isAdmin, bumpCatalog]);
+
   const routeDates = useMemo(
     () => assignRouteDates(result?.routes ?? [], { start: planStart, skipWeekends }, dateOverrides),
     [result, planStart, skipWeekends, dateOverrides],
@@ -217,6 +281,7 @@ function Aplicacion() {
 
   const openSection = useCallback((next: Section) => {
     setSection(next);
+    setMobileView("panel");
     if (next === "registro") setRegistroOpened(true);
   }, []);
 
@@ -255,11 +320,13 @@ function Aplicacion() {
   }, []);
 
   const handleFile = useCallback(
-    async (picked: File, origin: "usuario" | "registro" = "usuario") => {
+    async (picked: File, origin: FileOrigin = "usuario") => {
       setIsLoading(true);
       setError(null);
       clearSelection();
       setFile(picked);
+      setFileOrigin(origin);
+      if (origin !== "catalogo") setInputMode("planilla");
       clearPreview();
       setRegistroSync(origin === "registro" ? { file: picked, kind: "from-registry" } : null);
 
@@ -435,14 +502,38 @@ function Aplicacion() {
     }
   }, [result, routeDates, missingDateError, persistPlan]);
 
+  /** Cámaras elegidas del catálogo → planilla → paso 1, como una subida más. */
+  const handlePlanFromCatalog = useCallback(async () => {
+    if (catalogSelection.length === 0) return;
+    setIsLoading(true);
+    setError(null);
+    try {
+      const picked = await selectionWorkbook(catalogSelection);
+      setPlannedFromCatalog(catalogSelection.length);
+      await handleFile(picked, "catalogo");
+    } catch (err) {
+      setError(errorMessage(err));
+      setIsLoading(false);
+    }
+  }, [catalogSelection, handleFile]);
+
+  /** Desde el Inicio: estas cámaras, al selector del paso 1. */
+  const handlePlanCameras = useCallback(
+    (ids: string[]) => {
+      setCatalogSelection(ids);
+      setInputMode("catalogo");
+      openSection("plan");
+    },
+    [openSection],
+  );
+
   /** Tareas pendientes del registro → paso 1 del planificador. */
   const handlePlanTasks = useCallback(
     (picked: File) => {
-      setSection("plan");
-      setMobileView("panel");
+      openSection("plan");
       void handleFile(picked, "registro");
     },
-    [handleFile],
+    [handleFile, openSection],
   );
 
   const handleRouteDateChange = useCallback((key: string, iso: string) => {
@@ -477,6 +568,7 @@ function Aplicacion() {
         <nav aria-label="Sección" className="flex gap-1 rounded-lg bg-slate-900 p-1">
           {(
             [
+              ["inicio", "Inicio", IconHome],
               ["plan", "Planificar", IconCalendar],
               ["registro", "Registro", IconDatabase],
             ] as const
@@ -490,7 +582,7 @@ function Aplicacion() {
                 section === id ? "bg-sky-500 text-slate-950 shadow-sm" : "text-slate-400 hover:text-slate-100"
               }`}
             >
-              <Icon className="h-3.5 w-3.5" /> {label}
+              <Icon className="h-3.5 w-3.5" /> <span className="sr-only sm:not-sr-only">{label}</span>
             </button>
           ))}
         </nav>
@@ -504,6 +596,29 @@ function Aplicacion() {
         </nav>
         <UserMenu />
       </header>
+
+      {legacyNotice && (
+        <div className="flex items-start justify-between gap-3 border-b border-slate-800 bg-slate-900 px-4 py-2 text-xs text-slate-300">
+          <span>{legacyNotice}</span>
+          <button type="button" onClick={() => setLegacyNotice(null)} className="shrink-0 text-slate-500 hover:text-slate-200">
+            Cerrar
+          </button>
+        </div>
+      )}
+
+      <div className={`${section === "inicio" ? "flex" : "hidden"} min-h-0 flex-1`}>
+        <InicioView
+          version={catalogVersion + registroVersion}
+          cameras={camerasState.data}
+          camerasError={camerasState.error}
+          depots={depots}
+          isAdmin={isAdmin}
+          mobileView={mobileView}
+          onCatalogChanged={bumpCatalog}
+          onPlanCameras={handlePlanCameras}
+          onOpenSection={openSection}
+        />
+      </div>
 
       <div className={`${section === "plan" ? "flex" : "hidden"} min-h-0 flex-1`}>
         <aside
@@ -531,7 +646,20 @@ function Aplicacion() {
               onMappingChange={setMapping}
               onParamsChange={handleParamsChange}
               onRoutingChange={setRouting}
-              onDepotsChange={setDepots}
+              canEditDepots={isAdmin}
+              onDepotsChanged={bumpCatalog}
+              inputMode={inputMode}
+              onInputModeChange={setInputMode}
+              catalog={{
+                cameras: camerasState.data,
+                error: camerasState.error,
+                depots,
+                selection: catalogSelection,
+                plannedCount: fileOrigin === "catalogo" ? plannedFromCatalog : null,
+                onSelectionChange: setCatalogSelection,
+                onPlan: handlePlanFromCatalog,
+                onRetry: camerasState.retry,
+              }}
               onClusterStartsChange={setClusterStarts}
               onPreview={handlePreview}
               onOptimize={handleOptimize}
