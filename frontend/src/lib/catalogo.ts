@@ -67,10 +67,14 @@ export type CatalogCluster = {
   radius_km: number;
   /** Índice en la paleta: dos clusters vecinos nunca comparten. */
   color: number;
+  /** La sede de cuya zona es; null = sin sede (agrupado por cercanía). */
+  depot: { name: string; lat: number; lon: number } | null;
 };
 
 export type CatalogClusters = {
   eps_km: number;
+  by_depot: boolean;
+  depot_max_km: number;
   cameras: { id: string; cluster: number }[];
   clusters: CatalogCluster[];
   noise_count: number;
@@ -116,6 +120,10 @@ export type CatalogSummary = {
   tasks: TaskCounts;
   months: MonthTasks[];
   depots: DepotReach[];
+  /** Hasta dónde llega la zona de una sede. */
+  depot_max_km: number;
+  /** Cámaras a más de esa distancia de toda sede. */
+  outside_depots: number;
   planned_outside_catalog: number;
   last_import_at: string | null;
 };
@@ -130,10 +138,10 @@ export const LOCALITY_OUTSIDE = "Fuera de Salta";
 export const catalogPaths = {
   cameras: "/catalogo/camaras/",
   depots: "/catalogo/sedes/",
-  summary: "/catalogo/resumen",
+  summary: (depotMaxKm: number) => `/catalogo/resumen?max_sede_km=${depotMaxKm}`,
   imports: "/catalogo/importaciones/",
-  clusters: (epsKm: number, colors: number) =>
-    `/catalogo/clusters?eps_km=${epsKm}&colores=${colors}`,
+  clusters: (epsKm: number, colors: number, byDepot: boolean, depotMaxKm: number) =>
+    `/catalogo/clusters?eps_km=${epsKm}&colores=${colors}&por_sede=${byDepot}&max_sede_km=${depotMaxKm}`,
 };
 
 function request<T>(path: string, init?: RequestInit): Promise<T> {

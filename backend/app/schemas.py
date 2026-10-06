@@ -57,8 +57,17 @@ class Camera(BaseModel):
     )
 
 
+class ClusterDepot(BaseModel):
+    """Una sede, tal como la manda el planificador para agrupar por zona."""
+
+    name: str = Field(..., max_length=120)
+    lat: float = Field(..., ge=-90, le=90, allow_inf_nan=False)
+    lon: float = Field(..., ge=-180, le=180, allow_inf_nan=False)
+
+
 class Cluster(BaseModel):
-    """Agrupamiento geográfico de cámaras producido por DBSCAN."""
+    """Agrupamiento geográfico de cámaras: la zona de una sede o, sin sede
+    cerca, las cámaras cercanas entre sí (DBSCAN)."""
 
     id: int
     size: int
@@ -66,6 +75,9 @@ class Cluster(BaseModel):
     centroid_lon: float
     radius_km: float = Field(
         ..., description="Distancia máxima del centroide a un miembro"
+    )
+    depot: ClusterDepot | None = Field(
+        None, description="Sede de cuya zona es el cluster; None = sin sede"
     )
 
 
@@ -512,9 +524,12 @@ class CatalogCluster(Cluster):
 
 
 class CatalogClusters(BaseModel):
-    """El catálogo entero agrupado con DBSCAN."""
+    """El catálogo entero agrupado por zona de sede y, lo que queda lejos de
+    toda sede, por cercanía (DBSCAN)."""
 
     eps_km: float
+    by_depot: bool = Field(..., description="Si se agrupó por zona de sede")
+    depot_max_km: float
     cameras: list[CatalogClusterCamera]
     clusters: list[CatalogCluster]
     noise_count: int
@@ -585,6 +600,10 @@ class CatalogSummary(BaseModel):
     tasks: TaskCounts
     months: list[MonthTasks]
     depots: list[DepotReach]
+    depot_max_km: float = Field(..., description="Hasta dónde llega la zona de una sede")
+    outside_depots: int = Field(
+        ..., description="Cámaras a más de depot_max_km de toda sede (sin sede)"
+    )
     planned_outside_catalog: int = Field(
         ..., description="Cámaras con tareas en el registro que no están en el catálogo"
     )

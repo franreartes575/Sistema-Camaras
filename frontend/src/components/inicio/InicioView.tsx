@@ -72,14 +72,17 @@ export default function InicioView({
   onOpenSection,
 }: Props) {
   const [epsKm, setEpsKm] = useState(20);
+  // Una sede, un cluster, hasta 60 km; lo que queda lejos, por cercanía.
+  const [byDepot, setByDepot] = useState(true);
+  const [depotMaxKm, setDepotMaxKm] = useState(60);
   const [focused, setFocused] = useState<string | null>(null);
   // null = automático (abierto con el catálogo vacío). Una vez abierto o
   // cerrado, queda así: importar no lo vuelve a cerrar y esconde el resultado.
   const [adminOpen, setAdminOpen] = useState<boolean | null>(null);
 
-  const summary = useJson<CatalogSummary>(catalogPaths.summary, version);
+  const summary = useJson<CatalogSummary>(catalogPaths.summary(depotMaxKm), version);
   const plans = useJson<PlanSummary[]>(registryPaths.plans, version);
-  const clusters = useJson<CatalogClusters>(catalogPaths.clusters(epsKm, CLUSTER_PALETTE.length), version);
+  const clusters = useJson<CatalogClusters>(catalogPaths.clusters(epsKm, CLUSTER_PALETTE.length, byDepot, depotMaxKm), version);
 
   const allCameras = useMemo(() => cameras ?? [], [cameras]);
   const data = summary.data;
@@ -184,8 +187,12 @@ export default function InicioView({
                 <Section title="Última visita">
                   <VisitAgeBars summary={data} />
                 </Section>
-                <Section title="Cámaras por sede más cercana">
-                  <DepotReachBars depots={data.depots} />
+                <Section title="Cámaras por zona de sede">
+                  <DepotReachBars
+                    depots={data.depots}
+                    outside={data.outside_depots}
+                    maxKm={data.depot_max_km}
+                  />
                 </Section>
               </div>
 
@@ -255,6 +262,10 @@ export default function InicioView({
           epsKm={epsKm}
           isClustering={clusters.loading}
           onEpsChange={setEpsKm}
+          byDepot={byDepot}
+          depotMaxKm={depotMaxKm}
+          onByDepotChange={setByDepot}
+          onDepotMaxKmChange={setDepotMaxKm}
         />
         {focused && (
           <div className="absolute bottom-8 left-1/2 z-10 flex -translate-x-1/2 items-center gap-2 rounded-lg bg-slate-950/90 px-3 py-1.5 text-xs text-slate-200 shadow-lg ring-1 ring-white/10">

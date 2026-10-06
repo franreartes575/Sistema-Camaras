@@ -24,6 +24,7 @@ import type {
 export function ClusterStep({
   params,
   preview,
+  depotCount,
   canPreview,
   isLoading,
   onParamsChange,
@@ -31,19 +32,43 @@ export function ClusterStep({
 }: {
   params: ClusterParams;
   preview: ProcessResponse | null;
+  /** Sedes cargadas: sin ninguna, se agrupa sólo por cercanía. */
+  depotCount: number;
   canPreview: boolean;
   isLoading: boolean;
   onParamsChange: (params: ClusterParams) => void;
   onPreview: () => void;
 }) {
+  const byDepot = params.group_by_depot && depotCount > 0;
+  const withoutDepot = preview?.clusters.filter((cluster) => !cluster.depot).length ?? 0;
   return (
     <>
       <p className="text-xs leading-relaxed text-slate-500">
-        Junta las cámaras cercanas entre sí; cada grupo (cluster) sale desde su
-        propio punto de partida.
+        {byDepot
+          ? "Cada sede se lleva las cámaras de su zona y sale desde ahí. Las que quedan lejos de toda sede se juntan por cercanía."
+          : "Junta las cámaras cercanas entre sí; cada grupo (cluster) sale desde su propio punto de partida."}
       </p>
+      <Toggle
+        label="Agrupar por sede"
+        checked={params.group_by_depot}
+        onChange={(group_by_depot) => onParamsChange({ ...params, group_by_depot })}
+      />
+      {params.group_by_depot && depotCount === 0 && (
+        <Notice tone="info">No hay sedes cargadas: se agrupa sólo por cercanía.</Notice>
+      )}
+      {byDepot && (
+        <Slider
+          label="Zona de cada sede (en línea recta)"
+          value={params.depot_max_km}
+          display={`hasta ${params.depot_max_km} km`}
+          min={10}
+          max={150}
+          step={5}
+          onChange={(depot_max_km) => onParamsChange({ ...params, depot_max_km })}
+        />
+      )}
       <Slider
-        label="Radio de vecindad"
+        label={byDepot ? "Radio para las cámaras sin sede" : "Radio de vecindad"}
         value={params.eps_km}
         display={`${params.eps_km} km`}
         min={0.5}
@@ -79,6 +104,11 @@ export function ClusterStep({
       <button type="button" onClick={onPreview} disabled={!canPreview} className={BUTTON.primary}>
         {isLoading ? "Agrupando…" : preview ? "Volver a agrupar" : "Agrupar cámaras"}
       </button>
+      {preview && byDepot && withoutDepot > 0 && (
+        <Notice tone="info">
+          {withoutDepot} cluster(s) quedan lejos de toda sede: elegí su salida en el paso 3.
+        </Notice>
+      )}
       {preview && preview.stats.done_rows > 0 && (
         <Notice tone="info">
           {preview.stats.done_rows} cámara(s) ya figuran como realizadas y no se
@@ -182,7 +212,10 @@ function ClusterStartRow({
   return (
     <li className="space-y-2 rounded-lg bg-slate-900 p-3">
       <div className="flex items-baseline justify-between gap-2 text-xs">
-        <span className="font-semibold text-slate-100">Cluster {cluster.id}</span>
+        <span className="font-semibold text-slate-100">
+          Cluster {cluster.id}
+          <span className="font-normal text-slate-400"> · {cluster.depot ? cluster.depot.name : "sin sede"}</span>
+        </span>
         <span className="text-slate-500">
           {cluster.size} cámaras · radio {cluster.radius_km.toFixed(1)} km
         </span>

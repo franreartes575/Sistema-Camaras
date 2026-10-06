@@ -17,7 +17,7 @@ import "maplibre-gl/dist/maplibre-gl.css";
 import type { Depot } from "@/lib/api";
 import type { CatalogCamera, CatalogClusters } from "@/lib/catalogo";
 import { formatShortDate } from "@/lib/format";
-import { circlePolygon } from "@/lib/geo";
+import { clusterOutlines } from "@/lib/geo";
 import { OSM_STYLE } from "@/lib/mapStyle";
 import {
   CLUSTER_COLOR_EXPRESSION,
@@ -33,8 +33,13 @@ type Props = {
   depots: Depot[];
   focusedLocality: string | null;
   epsKm: number;
+  /** Una sede, un cluster (true) o sólo por cercanía (false). */
+  byDepot: boolean;
+  depotMaxKm: number;
   isClustering: boolean;
   onEpsChange: (eps: number) => void;
+  onByDepotChange: (byDepot: boolean) => void;
+  onDepotMaxKmChange: (km: number) => void;
 };
 
 type HoverInfo = { lat: number; lon: number; camera: CatalogCamera; cluster: number };
@@ -46,6 +51,8 @@ const LABEL_INK = "#0b0b0b";
 // Filtro "todo": MapLibre rechaza la capa si `filter` no es un array.
 const MATCH_ALL = ["has", "id"];
 const EPS_OPTIONS = [2, 5, 10, 20, 30, 50];
+const DEPOT_KM_OPTIONS = [30, 45, 60, 80, 100];
+const SELECT_CLASS = "rounded border border-slate-700 bg-slate-900 px-1 py-0.5 text-[11px] text-slate-100";
 
 export default function CatalogMap({
   cameras,
@@ -53,8 +60,12 @@ export default function CatalogMap({
   depots,
   focusedLocality,
   epsKm,
+  byDepot,
+  depotMaxKm,
   isClustering,
   onEpsChange,
+  onByDepotChange,
+  onDepotMaxKmChange,
 }: Props) {
   const mapRef = useRef<MapRef | null>(null);
   const [hover, setHover] = useState<HoverInfo | null>(null);
@@ -100,16 +111,28 @@ export default function CatalogMap({
     return all.filter((cluster) => present.has(cluster.id));
   }, [clusters, focusedLocality, cameras, clusterOf]);
 
-  const boundaries = useMemo(
-    () => ({
+  // El contorno sigue la forma real del cluster (ver `clusterOutlines`): un
+  // círculo hasta la cámara más lejana exageraba los grupos alargados.
+  const boundaries = useMemo(() => {
+    const outlines = clusterOutlines(cameras, (camera) => clusterOf.get(camera.id) ?? -1);
+    return {
       type: "FeatureCollection" as const,
-      features: visibleClusters.map((cluster) => ({
-        type: "Feature" as const,
-        geometry: circlePolygon(cluster.centroid_lat, cluster.centroid_lon, Math.max(cluster.radius_km, 0.2) + 0.15),
-        properties: { id: cluster.id, color: cluster.color },
-      })),
-    }),
-    [visibleClusters],
+      features: visibleClusters.flatMap((cluster) => {
+        const geometry = outlines.get(cluster.id);
+        return geometry
+          ? [{
+              type: "Feature" as const,
+              geometry,
+              properties: { id: cluster.id, color: cluster.color, sede: Boolean(cluster.depot) },
+            }]
+          : [];
+      }),
+    };
+  }, [visibleClusters, cameras, clusterOf]);
+
+  const clusterById = useMemo(
+    () => new Map((clusters?.clusters ?? []).map((cluster) => [cluster.id, cluster])),
+    [clusters],
   );
 
   const labels = useMemo(
@@ -216,6 +239,12 @@ export default function CatalogMap({
             </span>
             Cluster (rótulo C n)
           </span>
+          {byDepot && (
+            <span className="flex items-center gap-1">
+              <span className="w-3 border-t-2 border-dashed border-slate-300" />
+              Sin sede
+            </span>
+          )}
           <span className="flex items-center gap-1">
             <span className="h-2.5 w-2.5 rounded-full ring-1 ring-white" style={{ backgroundColor: NOISE_INK }} />
             Suelta
@@ -225,19 +254,50 @@ export default function CatalogMap({
             Sede
           </span>
         </div>
-        <label className="flex items-center gap-1.5 text-slate-400">
-          Agrupar a
-          <select
-            value={epsKm}
-            onChange={(event) => onEpsChange(Number(event.target.value))}
-            className="rounded border border-slate-700 bg-slate-900 px-1 py-0.5 text-[11px] text-slate-100"
-          >
-            {EPS_OPTIONS.map((value) => (
-              <option key={value} value={value}>
-                {value} km
-              </option>
-            ))}
-          </select>
+        <div className="flex flex-wrap items-center gap-x-1.5 gap-y-1 text-slate-400">
+          <label className="flex items-center gap-1.5">
+            Agrupar
+            <select
+              value={byDepot ? "sede" : "cercania"}
+              onChange={(event) => onByDepotChange(event.target.value === "sede")}
+              className={SELECT_CLASS}
+            >
+              <option value="sede">por sede</option>
+              <option value="cercania">por cercanía</option>
+            </select>
+          </label>
+          {byDepot && (
+            <label className="flex items-center gap-1.5">
+              hasta
+              <select
+                value={depotMaxKm}
+                onChange={(event) => onDepotMaxKmChange(Number(event.target.value))}
+                aria-label="Zona de cada sede"
+                className={SELECT_CLASS}
+              >
+                {DEPOT_KM_OPTIONS.map((value) => (
+                  <option key={value} value={value}>
+                    {value} km
+                  </option>
+                ))}
+              </select>
+            </label>
+          )}
+          <label className="flex items-center gap-1.5">
+            {byDepot ? "· sin sede, a" : "a"}
+            <select
+              value={epsKm}
+              onChange={(event) => onEpsChange(Number(event.target.value))}
+              aria-label="Radio de agrupamiento"
+              className={SELECT_CLASS}
+            >
+              {EPS_OPTIONS.map((value) => (
+                <option key={value} value={value}>
+                  {value} km
+                </option>
+              ))}
+            </select>
+          </label>
           {clusters && (
             <span className="text-slate-300">
               · {clusters.clusters.length} cluster{clusters.clusters.length === 1 ? "" : "s"}
@@ -245,7 +305,7 @@ export default function CatalogMap({
             </span>
           )}
           {isClustering && <span className="text-slate-500">· calculando…</span>}
-        </label>
+        </div>
       </div>
 
       {boundaries.features.length > 0 && (
@@ -256,11 +316,26 @@ export default function CatalogMap({
             // eslint-disable-next-line @typescript-eslint/no-explicit-any
             paint={{ "fill-color": CLUSTER_COLOR_EXPRESSION as any, "fill-opacity": 0.1 }}
           />
+          {/* La zona de una sede va con borde lleno; lo agrupado sin sede, punteado.
+              `line-dasharray` no admite expresiones por dato: son dos capas. */}
           <Layer
             id="catalogo-limites-borde"
             type="line"
+            filter={["==", ["get", "sede"], true]}
             // eslint-disable-next-line @typescript-eslint/no-explicit-any
-            paint={{ "line-color": CLUSTER_COLOR_EXPRESSION as any, "line-width": 1.5, "line-opacity": 0.6 }}
+            paint={{ "line-color": CLUSTER_COLOR_EXPRESSION as any, "line-width": 2, "line-opacity": 0.7 }}
+          />
+          <Layer
+            id="catalogo-limites-borde-sin-sede"
+            type="line"
+            filter={["==", ["get", "sede"], false]}
+            paint={{
+              // eslint-disable-next-line @typescript-eslint/no-explicit-any
+              "line-color": CLUSTER_COLOR_EXPRESSION as any,
+              "line-width": 1.5,
+              "line-opacity": 0.7,
+              "line-dasharray": [2, 2],
+            }}
           />
         </Source>
       )}
@@ -362,7 +437,15 @@ export default function CatalogMap({
             <div className="font-mono font-semibold text-slate-950">{hover.camera.id}</div>
             {hover.camera.label && <div>{hover.camera.label}</div>}
             <div>
-              {hover.camera.locality} · {hover.cluster === -1 ? "suelta" : `cluster C${hover.cluster}`}
+              {hover.camera.locality} · {hover.cluster === -1
+                ? "suelta"
+                : `cluster C${hover.cluster}${
+                    clusterById.get(hover.cluster)?.depot
+                      ? ` (zona ${clusterById.get(hover.cluster)?.depot?.name})`
+                      : byDepot
+                        ? " (sin sede)"
+                        : ""
+                  }`}
             </div>
             <div className="text-slate-600">
               {hover.camera.last_visit
