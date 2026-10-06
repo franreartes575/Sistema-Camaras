@@ -17,7 +17,7 @@ import "maplibre-gl/dist/maplibre-gl.css";
 import type { Depot } from "@/lib/api";
 import type { CatalogCamera, CatalogClusters } from "@/lib/catalogo";
 import { formatShortDate } from "@/lib/format";
-import { clusterOutlines } from "@/lib/geo";
+import { circlePolygon } from "@/lib/geo";
 import { OSM_STYLE } from "@/lib/mapStyle";
 import {
   CLUSTER_COLOR_EXPRESSION,
@@ -111,24 +111,17 @@ export default function CatalogMap({
     return all.filter((cluster) => present.has(cluster.id));
   }, [clusters, focusedLocality, cameras, clusterOf]);
 
-  // El contorno sigue la forma real del cluster (ver `clusterOutlines`): un
-  // círculo hasta la cámara más lejana exageraba los grupos alargados.
-  const boundaries = useMemo(() => {
-    const outlines = clusterOutlines(cameras, (camera) => clusterOf.get(camera.id) ?? -1);
-    return {
+  const boundaries = useMemo(
+    () => ({
       type: "FeatureCollection" as const,
-      features: visibleClusters.flatMap((cluster) => {
-        const geometry = outlines.get(cluster.id);
-        return geometry
-          ? [{
-              type: "Feature" as const,
-              geometry,
-              properties: { id: cluster.id, color: cluster.color, sede: Boolean(cluster.depot) },
-            }]
-          : [];
-      }),
-    };
-  }, [visibleClusters, cameras, clusterOf]);
+      features: visibleClusters.map((cluster) => ({
+        type: "Feature" as const,
+        geometry: circlePolygon(cluster.centroid_lat, cluster.centroid_lon, cluster.radius_km),
+        properties: { id: cluster.id, color: cluster.color, sede: Boolean(cluster.depot) },
+      })),
+    }),
+    [visibleClusters],
+  );
 
   const clusterById = useMemo(
     () => new Map((clusters?.clusters ?? []).map((cluster) => [cluster.id, cluster])),
