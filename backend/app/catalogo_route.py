@@ -137,8 +137,10 @@ async def clusters(
     eps_km: Annotated[float, Query(gt=0, le=500)] = 20.0,
     min_samples: Annotated[int, Query(ge=1, le=1000)] = 2,
     # En el mapa una cámara suelta se suma a un grupo sólo si está a menos de
-    # un radio: con tres, un grupo chico se estiraba hasta 60 km.
-    noise_reassign_factor: Annotated[float, Query(ge=0, le=20)] = 1.0,
+    # 1,5 radios (30 km con el radio por defecto): con tres, un grupo chico se
+    # estiraba hasta 60 km, y con uno quedaban afuera cámaras a 24-27 km de un
+    # grupo grande (El Galpón y El Quebrachal, de J. V. González).
+    noise_reassign_factor: Annotated[float, Query(ge=0, le=20)] = 1.5,
     colores: Annotated[int, Query(ge=1, le=20, description="Colores de la paleta")] = 8,
     por_sede: bool = True,
     max_sede_km: Annotated[float, Query(ge=1, le=500)] = DEPOT_MAX_KM,
