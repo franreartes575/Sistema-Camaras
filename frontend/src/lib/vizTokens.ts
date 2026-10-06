@@ -91,22 +91,27 @@ export const ROUTE_LINE = SERIES_BASE;
 /**
  * Colores de los días del Registro: uno por fecha, para reconocerla de un
  * vistazo en el mapa y en la grilla de días. Son diez porque un plan suele
- * tener hasta diez jornadas; con más, se repiten. Más de cinco tonos sobre el
- * fondo de OSM se parecen entre sí (azul/índigo, naranja/dorado): por eso el
- * mapa suma una leyenda con el color de cada día y el rótulo "fecha · Día N"
- * sobre cada línea.
+ * tener hasta diez jornadas; con más, se repiten.
+ *
+ * El orden importa: los colores se asignan por fecha, así que dos días
+ * seguidos reciben colores vecinos de la lista, y por eso van alternados
+ * (frío/cálido, claro/oscuro): entre vecinos la distancia de color (ΔE76) es
+ * de 62 como mínimo. Los dos más parecidos (bermellón y ámbar, ΔE 24) quedan
+ * a cinco lugares uno del otro. Con diez tonos sobre el fondo de OSM igual
+ * hay parecidos: el mapa suma una leyenda con el color de cada día y el
+ * rótulo "fecha · Día N" sobre cada línea.
  */
 export const REGISTRY_DAY_PALETTE = [
-  "#1f6fd1", // azul
-  "#d96300", // naranja
+  "#0072b2", // azul
+  "#d55e00", // bermellón
+  "#009e73", // verde
+  "#b6407f", // magenta
+  "#2b2b2b", // carbón
   "#7a3db8", // violeta
-  "#d6336c", // rosa
-  "#0a9396", // verde azulado
-  "#8a5a2b", // marrón
-  "#a67c00", // dorado
-  "#3a7d1e", // verde oscuro
-  "#4f46e5", // índigo
+  "#c27c00", // ámbar
+  "#2aa7d8", // celeste
   "#b91c1c", // carmesí
+  "#6a8d1f", // oliva
 ] as const;
 
 /**

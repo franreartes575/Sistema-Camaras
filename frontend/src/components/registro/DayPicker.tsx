@@ -128,7 +128,7 @@ export default function DayPicker({
                   >
                     <span
                       aria-hidden="true"
-                      className="mb-1 h-1.5 w-full rounded-full"
+                      className="mb-1 h-2 w-full rounded-full"
                       style={{ backgroundColor: dayColors[date] }}
                     />
                     <span className={`text-sm tabular-nums ${date === today ? "font-bold text-sky-200" : "font-semibold"}`}>
