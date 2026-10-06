@@ -13,8 +13,10 @@
 import dynamic from "next/dynamic";
 import { useCallback, useEffect, useMemo, useState } from "react";
 
+import DayPicker from "@/components/registro/DayPicker";
 import { ImportDropzone, ImportHistory } from "@/components/registro/ImportPanel";
 import PlanList from "@/components/registro/PlanList";
+import PlanPicker from "@/components/registro/PlanPicker";
 import RouteList, { STATE_FILTERS, type StateFilter } from "@/components/registro/RouteList";
 import Summary from "@/components/registro/Summary";
 import TaskList, { TASK_VIEWS, type TaskView } from "@/components/registro/TaskList";
@@ -61,15 +63,29 @@ function errorMessage(err: unknown): string {
 }
 
 /**
- * Qué se ve en el mapa antes de que el usuario elija: las jornadas del día más
- * reciente que ya pasó (o el próximo programado, si todo es futuro).
+ * Qué se ve en el mapa antes de que el usuario marque días: con un plan elegido,
+ * todos sus días; con "Todos los planes", nada (los días se marcan a mano).
  */
-function defaultSelection(routes: RouteSummary[], today: string): number[] {
-  if (routes.length === 0) return [];
-  // `routes` viene de la fecha más nueva a la más vieja.
-  const past = routes.find((route) => route.date <= today);
-  const target = past ? past.date : routes[routes.length - 1].date;
-  return routes.filter((route) => route.date === target).map((route) => route.id);
+function defaultSelection(routes: RouteSummary[], planId: number | null): number[] {
+  return planId !== null ? routes.map((route) => route.id) : [];
+}
+
+/** Del primer día al último; el mismo día, por plan, cluster y número de jornada. */
+function sortRoutes(routes: RouteSummary[]): RouteSummary[] {
+  return [...routes].sort(
+    (a, b) => a.date.localeCompare(b.date) || a.plan_id - b.plan_id || a.cluster_id - b.cluster_id || a.day - b.day,
+  );
+}
+
+function sortTasks(tasks: Task[]): Task[] {
+  return [...tasks].sort(
+    (a, b) =>
+      a.date.localeCompare(b.date) ||
+      a.plan_id - b.plan_id ||
+      a.cluster_id - b.cluster_id ||
+      a.day - b.day ||
+      a.order - b.order,
+  );
 }
 
 type Props = {
@@ -83,7 +99,9 @@ type Props = {
 
 export default function RegistroView({ refreshKey, mobileView, onShowMap, onPlanTasks }: Props) {
   const [today] = useState(todayIso);
-  const [filters, setFilters] = useState<RegistryFilters>(EMPTY_FILTERS);
+  const [baseFilters, setBaseFilters] = useState<RegistryFilters>(EMPTY_FILTERS);
+  // "none": todavía no eligió nada, no se muestra ningún plan. null: eligió "Todos los planes".
+  const [planChoice, setPlanChoice] = useState<number | null | "none">("none");
   const [search, setSearch] = useState("");
   const [tab, setTab] = useState<Tab>("recorridos");
   const [stateFilter, setStateFilter] = useState<StateFilter>("todos");
@@ -109,23 +127,39 @@ export default function RegistroView({ refreshKey, mobileView, onShowMap, onPlan
   // El buscador filtra con una pequeña demora para no consultar por cada tecla.
   useEffect(() => {
     const timer = setTimeout(
-      () => setFilters((prev) => (prev.q === search ? prev : { ...prev, q: search })),
+      () => setBaseFilters((prev) => (prev.q === search ? prev : { ...prev, q: search })),
       300,
     );
     return () => clearTimeout(timer);
   }, [search]);
 
-  const taskStatuses = TASK_VIEWS.find((view) => view.id === taskView)?.statuses ?? [];
-  const routesQuery = useJson<RouteSummary[]>(registryPaths.routes(filters), version);
   const plansQuery = useJson<PlanSummary[]>(registryPaths.plans, version);
+  const plans = useMemo(() => plansQuery.data ?? [], [plansQuery.data]);
+  // El usuario elige el plan: hasta entonces no se muestra ninguno. Si el elegido
+  // se borra, vuelve a "sin elegir".
+  const planId = typeof planChoice === "number" && plans.some((plan) => plan.id === planChoice) ? planChoice : null;
+  const hasChoice = planChoice === null || planId !== null;
+  const filters = useMemo<RegistryFilters>(() => ({ ...baseFilters, planId }), [baseFilters, planId]);
+
+  /** Elige el plan visible: el mapa pasa a mostrar todos los días del nuevo. */
+  const choosePlan = useCallback((choice: number | null | "none") => {
+    setPlanChoice(choice);
+    setSelection(null);
+    setFocusedId(null);
+    setExpandedId(null);
+  }, []);
+
+  const taskStatuses = TASK_VIEWS.find((view) => view.id === taskView)?.statuses ?? [];
+  const routesQuery = useJson<RouteSummary[]>(hasChoice ? registryPaths.routes(filters) : null, version);
   const importsQuery = useJson<FollowUpImport[]>(tab === "cargas" ? registryPaths.imports : null, version);
   const tasksQuery = useJson<Task[]>(
-    tab === "tareas" ? registryPaths.tasks(filters, taskStatuses) : null,
+    tab === "tareas" && hasChoice ? registryPaths.tasks(filters, taskStatuses) : null,
     version,
   );
 
-  const routes = useMemo(() => routesQuery.data ?? [], [routesQuery.data]);
-  const plans = plansQuery.data ?? [];
+  // useJson conserva lo último que leyó: sin plan elegido no se muestra nada de eso.
+  const routes = useMemo(() => (hasChoice ? sortRoutes(routesQuery.data ?? []) : []), [hasChoice, routesQuery.data]);
+  const tasks = useMemo(() => (hasChoice ? sortTasks(tasksQuery.data ?? []) : []), [hasChoice, tasksQuery.data]);
 
   const stateCounts = useMemo(() => {
     const counts = Object.fromEntries(STATE_FILTERS.map(({ id }) => [id, 0])) as Record<StateFilter, number>;
@@ -140,8 +174,8 @@ export default function RegistroView({ refreshKey, mobileView, onShowMap, onPlan
   // la selección y reaparece si el filtro vuelve a incluirlo.
   const selected = useMemo(() => {
     const ids = new Set(routes.map((route) => route.id));
-    return (selection ?? defaultSelection(routes, today)).filter((id) => ids.has(id));
-  }, [selection, routes, today]);
+    return (selection ?? defaultSelection(routes, filters.planId)).filter((id) => ids.has(id));
+  }, [selection, routes, filters.planId]);
   const selectedSet = useMemo(() => new Set(selected), [selected]);
 
   // ------------------------------------------------------------ detalle para el mapa
@@ -191,6 +225,15 @@ export default function RegistroView({ refreshKey, mobileView, onShowMap, onPlan
       if (focusedId === id) setFocusedId(null);
     } else {
       select([...selected, id]);
+    }
+  };
+
+  /** Deja en el mapa exactamente estas jornadas. */
+  const replaceSelection = (ids: number[]) => {
+    select(ids);
+    if (focusedId !== null && !ids.includes(focusedId)) {
+      setFocusedId(null);
+      setExpandedId(null);
     }
   };
 
@@ -275,7 +318,7 @@ export default function RegistroView({ refreshKey, mobileView, onShowMap, onPlan
     setActionError(null);
     try {
       await deletePlan(planId);
-      if (filters.planId === planId) setFilters((prev) => ({ ...prev, planId: null }));
+      if (planChoice === planId) choosePlan("none");
       refresh();
     } catch (err) {
       setActionError(errorMessage(err));
@@ -302,6 +345,23 @@ export default function RegistroView({ refreshKey, mobileView, onShowMap, onPlan
     setActionError(null);
     try {
       const { blob, filename } = await downloadTasks(filters, taskStatuses);
+      downloadBlob(blob, filename);
+    } catch (err) {
+      setActionError(errorMessage(err));
+    } finally {
+      setIsDownloading(false);
+    }
+  };
+
+  /** Excel con todas las tareas del plan (o de todos), con lo informado hasta ahora. */
+  const downloadUpdated = async (forPlanId: number | null) => {
+    setIsDownloading(true);
+    setActionError(null);
+    try {
+      const { blob, filename } = await downloadTasks(
+        { desde: "", hasta: "", q: "", planId: forPlanId },
+        [],
+      );
       downloadBlob(blob, filename);
     } catch (err) {
       setActionError(errorMessage(err));
@@ -371,12 +431,20 @@ export default function RegistroView({ refreshKey, mobileView, onShowMap, onPlan
             onDismiss={() => setUploadResult(null)}
           />
 
+          <PlanPicker
+            plans={plans}
+            planId={filters.planId}
+            chosen={hasChoice}
+            isDownloading={isDownloading}
+            onChange={choosePlan}
+            onDownload={() => downloadUpdated(filters.planId)}
+          />
+
           <FiltersBar
             filters={filters}
             search={search}
-            plans={plans}
             today={today}
-            onChange={setFilters}
+            onChange={setBaseFilters}
             onSearchChange={setSearch}
           />
 
@@ -400,7 +468,20 @@ export default function RegistroView({ refreshKey, mobileView, onShowMap, onPlan
           </div>
 
           <div role="tabpanel">
-            {tab === "recorridos" && (
+            {(tab === "recorridos" || tab === "tareas") && !hasChoice && (
+              <p className="rounded-lg border border-dashed border-slate-700 px-3 py-6 text-center text-sm leading-relaxed text-slate-400">
+                Elegí un plan arriba para ver sus recorridos y tareas.
+              </p>
+            )}
+            {tab === "recorridos" && hasChoice && (
+              <div className="space-y-3">
+              <DayPicker
+                routes={routes}
+                selected={selectedSet}
+                today={today}
+                onSetMany={setMany}
+                onReplace={replaceSelection}
+              />
               <RouteList
                 routes={listedRoutes}
                 today={today}
@@ -417,10 +498,11 @@ export default function RegistroView({ refreshKey, mobileView, onShowMap, onPlan
                 onFocus={focusRoute}
                 onTaskStatus={changeTaskStatus}
               />
+              </div>
             )}
-            {tab === "tareas" && (
+            {tab === "tareas" && hasChoice && (
               <TaskList
-                tasks={tasksQuery.data ?? []}
+                tasks={tasks}
                 loading={tasksQuery.loading}
                 view={taskView}
                 busyTaskId={busyTaskId}
@@ -439,11 +521,15 @@ export default function RegistroView({ refreshKey, mobileView, onShowMap, onPlan
                 filteredPlanId={filters.planId}
                 busyPlanId={busyPlanId}
                 onFilter={(planId) => {
-                  setFilters((prev) => ({ ...prev, planId }));
-                  if (planId !== null) setTab("recorridos");
+                  choosePlan(planId);
+                  if (planId !== null) {
+                    setTab("recorridos");
+                    onShowMap();
+                  }
                 }}
                 onRename={renamePlan}
                 onDelete={removePlan}
+                onDownload={downloadUpdated}
               />
             )}
             {tab === "cargas" && <ImportHistory imports={importsQuery.data ?? []} />}

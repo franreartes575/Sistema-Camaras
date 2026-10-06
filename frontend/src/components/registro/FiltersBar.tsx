@@ -1,11 +1,11 @@
 "use client";
 
-/** Filtros del registro: período (con atajos), plan y búsqueda de texto. */
+/** Filtros del registro: período (con atajos) y búsqueda de texto. El plan se elige aparte (PlanPicker). */
 
 import { IconSearch, IconX } from "@/components/ui/icons";
 import { formatShortDate } from "@/lib/format";
 import { monthRangeIso, shiftIso, weekStartIso } from "@/lib/planDates";
-import type { PlanSummary, RegistryFilters } from "@/lib/registro";
+import type { RegistryFilters } from "@/lib/registro";
 
 type Preset = { id: string; label: string; range: (today: string) => { desde: string; hasta: string } };
 
@@ -33,7 +33,6 @@ const DATE_INPUT =
 export default function FiltersBar({
   filters,
   search,
-  plans,
   today,
   onChange,
   onSearchChange,
@@ -41,7 +40,6 @@ export default function FiltersBar({
   filters: RegistryFilters;
   /** Texto del buscador tal como se escribe (el filtro aplica con demora). */
   search: string;
-  plans: PlanSummary[];
   today: string;
   onChange: (filters: RegistryFilters) => void;
   onSearchChange: (text: string) => void;
@@ -51,7 +49,7 @@ export default function FiltersBar({
     return range.desde === filters.desde && range.hasta === filters.hasta;
   });
   const set = (patch: Partial<RegistryFilters>) => onChange({ ...filters, ...patch });
-  const hasFilters = Boolean(filters.desde || filters.hasta || filters.planId !== null || search);
+  const hasFilters = Boolean(filters.desde || filters.hasta || search);
 
   return (
     <div className="space-y-2.5 rounded-xl border border-slate-800 bg-slate-900/40 p-3">
@@ -61,7 +59,7 @@ export default function FiltersBar({
           <button
             type="button"
             onClick={() => {
-              onChange({ desde: "", hasta: "", planId: null, q: "" });
+              onChange({ desde: "", hasta: "", planId: filters.planId, q: "" });
               onSearchChange("");
             }}
             className="inline-flex items-center gap-1 rounded-md px-1.5 py-0.5 text-xs text-slate-400 transition hover:bg-slate-800 hover:text-slate-100"
@@ -120,22 +118,6 @@ export default function FiltersBar({
           />
         </label>
       </div>
-
-      <label className="block">
-        <span className="mb-1 block text-[11px] font-medium text-slate-500">Plan</span>
-        <select
-          value={filters.planId ?? ""}
-          onChange={(event) => set({ planId: event.target.value ? Number(event.target.value) : null })}
-          className={DATE_INPUT}
-        >
-          <option value="">Todos los planes</option>
-          {plans.map((plan) => (
-            <option key={plan.id} value={plan.id}>
-              {plan.name}
-            </option>
-          ))}
-        </select>
-      </label>
 
       <label className="relative block">
         <span className="sr-only">Buscar</span>
