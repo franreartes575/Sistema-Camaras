@@ -71,7 +71,7 @@ export default function InicioView({
   onPlanCameras,
   onOpenSection,
 }: Props) {
-  const [epsKm, setEpsKm] = useState(5);
+  const [epsKm, setEpsKm] = useState(20);
   const [focused, setFocused] = useState<string | null>(null);
   // null = automático (abierto con el catálogo vacío). Una vez abierto o
   // cerrado, queda así: importar no lo vuelve a cerrar y esconde el resultado.

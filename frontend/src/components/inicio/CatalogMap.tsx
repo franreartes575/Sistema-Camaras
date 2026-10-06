@@ -45,7 +45,7 @@ const POINTS_LAYER = "catalogo-punto";
 const LABEL_INK = "#0b0b0b";
 // Filtro "todo": MapLibre rechaza la capa si `filter` no es un array.
 const MATCH_ALL = ["has", "id"];
-const EPS_OPTIONS = [1, 2, 5, 10, 20];
+const EPS_OPTIONS = [2, 5, 10, 20, 30, 50];
 
 export default function CatalogMap({
   cameras,

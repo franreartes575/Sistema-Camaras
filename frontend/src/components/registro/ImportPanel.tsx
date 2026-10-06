@@ -59,7 +59,7 @@ export function ImportDropzone({
           const file = event.dataTransfer.files?.[0];
           if (file) onFile(file);
         }}
-        className={`flex cursor-pointer items-center gap-3 rounded-xl border border-dashed px-3 py-3 transition focus-within:border-sky-400 ${
+        className={`relative flex cursor-pointer items-center gap-3 rounded-xl border border-dashed px-3 py-3 transition focus-within:border-sky-400 ${
           isDragging
             ? "border-sky-400 bg-sky-500/10"
             : "border-slate-700 bg-slate-900/60 hover:border-sky-400/60 hover:bg-slate-900"

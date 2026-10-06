@@ -373,7 +373,7 @@ def test_clusters_del_catalogo_con_colores_distintos_entre_vecinos(client) -> No
 
 def test_clusters_con_el_catalogo_vacio(client) -> None:
     datos = client.get("/catalogo/clusters").json()
-    assert datos == {"eps_km": 5.0, "cameras": [], "clusters": [], "noise_count": 0}
+    assert datos == {"eps_km": 20.0, "cameras": [], "clusters": [], "noise_count": 0}
 
 
 def _cluster(cluster_id: int, lon: float, size: int = 3) -> dict:

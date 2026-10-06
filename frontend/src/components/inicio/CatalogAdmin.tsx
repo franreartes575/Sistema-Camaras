@@ -117,7 +117,7 @@ function ImportCatalog({ onImported }: { onImported: () => void }) {
 
   return (
     <div className="space-y-2.5">
-      <label className="flex cursor-pointer items-center gap-3 rounded-lg border border-dashed border-slate-700 bg-slate-900/60 px-3 py-2.5 transition hover:border-sky-400/60 focus-within:border-sky-400">
+      <label className="relative flex cursor-pointer items-center gap-3 rounded-lg border border-dashed border-slate-700 bg-slate-900/60 px-3 py-2.5 transition hover:border-sky-400/60 focus-within:border-sky-400">
         <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-md bg-sky-500/10 text-sky-300">
           <IconUpload className="h-4 w-4" />
         </span>
