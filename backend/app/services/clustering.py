@@ -162,3 +162,90 @@ def run_dbscan(
         )
 
     return labels, clusters
+
+
+# Hasta cuántos km (en línea recta) una cámara pertenece a la zona de una sede.
+# Salvador Mazza queda a unos 55 km de la sede de Tartagal y es de su zona; lo
+# que está más lejos de toda sede (Morillo, Rivadavia) se agrupa por cercanía.
+DEPOT_MAX_KM = 60.0
+
+
+def _summary(cluster_id: int, members: pd.DataFrame) -> dict[str, float | int]:
+    lat_values = members["lat"].to_numpy(dtype=float)
+    lon_values = members["lon"].to_numpy(dtype=float)
+    centroid_lat = float(lat_values.mean())
+    centroid_lon = float(lon_values.mean())
+    radius = haversine_km(lat_values, lon_values, centroid_lat, centroid_lon)
+    return {
+        "id": cluster_id,
+        "size": int(len(members)),
+        "centroid_lat": centroid_lat,
+        "centroid_lon": centroid_lon,
+        "radius_km": round(float(radius.max()), 3),
+    }
+
+
+def nearest_depot(
+    points: pd.DataFrame, depots: list[tuple[float, float]]
+) -> tuple[np.ndarray, np.ndarray]:
+    """Índice de la sede más cercana a cada punto y su distancia en km.
+
+    En empate gana la sede que viene primero. Sin sedes, índice -1 y distancia
+    infinita.
+    """
+    if not depots or points.empty:
+        return np.full(len(points), -1), np.full(len(points), np.inf)
+    lat = points["lat"].to_numpy(dtype=float)
+    lon = points["lon"].to_numpy(dtype=float)
+    distances = np.vstack([haversine_km(lat, lon, d_lat, d_lon) for d_lat, d_lon in depots])
+    nearest = distances.argmin(axis=0)  # argmin devuelve el primero en un empate
+    return nearest, distances[nearest, np.arange(len(points))]
+
+
+def cluster_by_depot(
+    points: pd.DataFrame,
+    depots: list[tuple[float, float]],
+    max_km: float,
+    eps_km: float,
+    min_samples: int,
+    noise_reassign_factor: float,
+) -> tuple[np.ndarray, list[dict[str, float | int | None]], np.ndarray]:
+    """Agrupa por zona de sede: una sede, un cluster.
+
+    Cada cámara va a la sede más cercana si está a `max_km` o menos. Las que
+    quedan más lejos de toda sede se agrupan entre ellas con DBSCAN (y la
+    reasignación de ruido de siempre); sus ids siguen a los de las sedes. Cada
+    cluster lleva `depot`: el índice de su sede en `depots`, o None.
+
+    Una sede sin cámaras cerca no forma cluster. Sin sedes, es el DBSCAN de
+    siempre. Devuelve también qué puntos eran ruido y se reasignaron.
+    """
+    labels = np.full(len(points), -1, dtype=int)
+    reassigned = np.zeros(len(points), dtype=bool)
+    clusters: list[dict[str, float | int | None]] = []
+    nearest, distance = nearest_depot(points, depots)
+    in_zone = distance <= max_km
+
+    for depot_index in range(len(depots)):
+        mask = in_zone & (nearest == depot_index)
+        if not mask.any():
+            continue
+        cluster_id = len(clusters)
+        labels[mask] = cluster_id
+        clusters.append({**_summary(cluster_id, points.loc[mask]), "depot": depot_index})
+
+    rest = np.flatnonzero(~in_zone)
+    if len(rest):
+        others = points.iloc[rest].reset_index(drop=True)
+        dbscan_labels, rest_clusters = run_dbscan(others, eps_km=eps_km, min_samples=min_samples)
+        rest_labels, rest_clusters = reassign_noise(
+            others, dbscan_labels, rest_clusters, max_km=eps_km * noise_reassign_factor
+        )
+        reassigned[rest] = (dbscan_labels == -1) & (rest_labels != -1)
+        offset = len(clusters)
+        labels[rest] = np.where(rest_labels == -1, -1, rest_labels + offset)
+        clusters.extend(
+            {**cluster, "id": int(cluster["id"]) + offset, "depot": None}
+            for cluster in rest_clusters
+        )
+    return labels, clusters, reassigned

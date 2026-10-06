@@ -78,7 +78,7 @@ provincia de Salta. El flujo completo es:
 
 ```
 planilla .xlsx → encabezados + mapeo sugerido → validación de coordenadas
-              → DBSCAN (agrupa por cercanía) → VRP por cluster (jornadas)
+              → zona de cada sede (o DBSCAN, lejos de toda sede) → VRP por cluster (jornadas)
               → fechas → Excel de seguimiento → técnicos lo completan
               → se vuelve a subir: lo realizado se aparta, lo pendiente se replanifica
 
@@ -361,13 +361,29 @@ navegador lo bloquea en silencio (queda sólo un error en la consola). El
 matcher excluye `/api`: si el proxy corriera ahí, Next retendría en memoria
 los cuerpos de las subidas (tope de 10 MB por defecto).
 
-### El radio de agrupamiento arranca en 20 km
+### Se agrupa por zona de sede
 
-En Salta los pueblos que atiende una misma sede quedan a más de 5 km entre sí
-(Orán, Pichanal, Yrigoyen): con el radio viejo de 5 km cada uno era un cluster
-aparte, mientras que en Tartagal varios quedaban encadenados en uno solo. Por
-eso el planificador (`params.eps_km` en `page.tsx`) y el mapa del Inicio
-arrancan en 20 km, y `GET /catalogo/clusters` usa el mismo valor por defecto.
+Una sede, un cluster: cada cámara va a la sede más cercana si está a 60 km o
+menos en línea recta (`DEPOT_MAX_KM`, `cluster_by_depot` en
+`services/clustering.py`). Así la sede de Tartagal toma Salvador Mazza (~55
+km), Aguaray y General Ballivián, que con DBSCAN quedaban como clusters
+aparte. Lo que queda más lejos de toda sede (Morillo, Rivadavia) se agrupa
+entre sí con el DBSCAN de siempre (radio de 20 km), sus ids siguen a los de
+las sedes y llevan `depot = None` ("sin sede").
+
+- **El planificador sigue sin estado**: las sedes viajan en el pedido
+  (`group_by_depot`, `depot_max_km`, `depots_json` en `/process/` y
+  `/optimize/`), no se leen de la base. Sin esos campos, la API se comporta
+  como antes. Después de agrupar, `handlePreview` (`page.tsx`) pone la sede
+  de cada cluster como su salida; los "sin sede" se eligen a mano.
+- El Inicio usa la tabla `sedes` (`GET /catalogo/clusters?por_sede=…&max_sede_km=…`)
+  y reasigna cámaras sueltas sólo dentro de un radio (no tres): con tres, un
+  grupo chico se estiraba hasta 60 km.
+- **El contorno de un cluster es la envolvente de sus cámaras**
+  (`clusterOutlines` en `lib/geo.ts`), no un círculo desde el centroide hasta
+  la más lejana, que exageraba los grupos alargados (una zona que sigue la
+  ruta 34). En el Inicio, la zona de una sede va con borde lleno y lo "sin
+  sede", punteado.
 
 ### Un `sr-only` necesita un ancestro `relative`
 

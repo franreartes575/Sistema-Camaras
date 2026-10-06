@@ -192,10 +192,14 @@ function Aplicacion() {
   const [mapping, setMapping] = useState<ColumnMapping>(EMPTY_MAPPING);
   // 20 km junta los pueblos que atiende una misma sede (Orán con Pichanal e
   // Yrigoyen, por ejemplo); con 5 km cada pueblo quedaba como un cluster aparte.
+  // Por defecto, una sede un cluster (hasta 60 km); el radio de 20 km es para
+  // las cámaras que quedan lejos de toda sede.
   const [params, setParams] = useState<ClusterParams>({
     eps_km: 20,
     min_samples: 2,
     noise_reassign_factor: 3,
+    group_by_depot: true,
+    depot_max_km: 60,
   });
   const [routing, setRouting] = useState<RouteParams>({
     provider: "auto",
@@ -384,8 +388,18 @@ function Aplicacion() {
     setError(null);
     clearSelection();
     try {
-      setPreview(await previewClusters(file, mapping, params));
-      setClusterStarts({});
+      const response = await previewClusters(file, mapping, params, depots);
+      setPreview(response);
+      // Los clusters de una sede salen de esa sede; los "sin sede" se eligen a mano.
+      setClusterStarts(
+        Object.fromEntries(
+          response.clusters.flatMap((cluster) =>
+            cluster.depot
+              ? [[cluster.id, { lat: cluster.depot.lat, lon: cluster.depot.lon, name: cluster.depot.name }]]
+              : [],
+          ),
+        ) as Record<number, ClusterStart>,
+      );
       setResult(null);
     } catch (err) {
       setPreview(null);
@@ -393,7 +407,7 @@ function Aplicacion() {
     } finally {
       setIsLoading(false);
     }
-  }, [file, mapping, params, clearSelection]);
+  }, [file, mapping, params, depots, clearSelection]);
 
   const handleOptimize = useCallback(async () => {
     if (!file) return;
@@ -401,7 +415,7 @@ function Aplicacion() {
     setError(null);
     clearSelection();
     try {
-      setResult(await optimize(file, mapping, params, routing, clusterStarts));
+      setResult(await optimize(file, mapping, params, routing, clusterStarts, depots));
       setDateOverrides({});
     } catch (err) {
       setResult(null);
@@ -409,7 +423,7 @@ function Aplicacion() {
     } finally {
       setIsLoading(false);
     }
-  }, [file, mapping, params, routing, clusterStarts, clearSelection]);
+  }, [file, mapping, params, routing, clusterStarts, depots, clearSelection]);
 
   // Estado del plan actual en el registro: guardado tal cual, guardado con
   // otras fechas (hay que actualizarlo) o sin guardar.

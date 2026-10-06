@@ -28,6 +28,7 @@ from .schemas import (
 )
 from .security import rate_limiter, require_api_key
 from .services import catalogo
+from .services.clustering import DEPOT_MAX_KM
 from .services.export import build_catalog_workbook, catalog_filename
 from .services.registro import ConflictError, NotFoundError
 
@@ -135,12 +136,18 @@ async def clusters(
     conn: Db,
     eps_km: Annotated[float, Query(gt=0, le=500)] = 20.0,
     min_samples: Annotated[int, Query(ge=1, le=1000)] = 2,
-    noise_reassign_factor: Annotated[float, Query(ge=0, le=20)] = 3.0,
+    # En el mapa una cámara suelta se suma a un grupo sólo si está a menos de
+    # un radio: con tres, un grupo chico se estiraba hasta 60 km.
+    noise_reassign_factor: Annotated[float, Query(ge=0, le=20)] = 1.0,
     colores: Annotated[int, Query(ge=1, le=20, description="Colores de la paleta")] = 8,
+    por_sede: bool = True,
+    max_sede_km: Annotated[float, Query(ge=1, le=500)] = DEPOT_MAX_KM,
 ) -> CatalogClusters:
-    """El catálogo entero agrupado con el mismo DBSCAN que el planificador."""
+    """El catálogo agrupado como en el planificador: por zona de sede y, lo
+    que queda lejos de toda sede, por cercanía."""
     return await anyio.to_thread.run_sync(
-        catalogo.cluster_catalog, conn, eps_km, min_samples, noise_reassign_factor, colores
+        catalogo.cluster_catalog, conn, eps_km, min_samples, noise_reassign_factor,
+        colores, por_sede, max_sede_km,
     )
 
 
@@ -188,6 +195,9 @@ def delete_depot(depot_id: int, conn: Db) -> Response:
 
 
 @router.get("/resumen", response_model=CatalogSummary)
-def summary(conn: Db) -> CatalogSummary:
-    """Catálogo por localidad, antigüedad de las visitas, planes y tareas por mes."""
-    return catalogo.summary(conn)
+def summary(
+    conn: Db, max_sede_km: Annotated[float, Query(ge=1, le=500)] = DEPOT_MAX_KM
+) -> CatalogSummary:
+    """Catálogo por localidad, antigüedad de las visitas, zonas de las sedes,
+    planes y tareas por mes."""
+    return catalogo.summary(conn, depot_max_km=max_sede_km)

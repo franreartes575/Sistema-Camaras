@@ -41,12 +41,17 @@ export type Camera = {
   reassigned: boolean;
 };
 
+/** Sede de cuya zona es un cluster. */
+export type ClusterDepot = { name: string; lat: number; lon: number };
+
 export type Cluster = {
   id: number;
   size: number;
   centroid_lat: number;
   centroid_lon: number;
   radius_km: number;
+  /** La sede de cuya zona es el cluster; null = sin sede (agrupado por cercanía). */
+  depot?: ClusterDepot | null;
 };
 
 export type DiscardedRow = { row: number; reason: string };
@@ -145,6 +150,10 @@ export type ClusterParams = {
   min_samples: number;
   /** Radio de reasignación de ruido, como múltiplo de eps_km. */
   noise_reassign_factor: number;
+  /** Una sede, un cluster: cada cámara va a la zona de su sede más cercana. */
+  group_by_depot: boolean;
+  /** Hasta cuántos km (en línea recta) llega la zona de una sede. */
+  depot_max_km: number;
 };
 
 export type RouteParams = {
@@ -178,8 +187,11 @@ export function uploadExcel(file: File): Promise<UploadExcelResponse> {
   return post<UploadExcelResponse>("/upload-excel/", body);
 }
 
-/** Campos de mapeo comunes a /process/ y /optimize/. */
-function mappingFields(file: File, mapping: ColumnMapping, params: ClusterParams) {
+/**
+ * Campos de mapeo comunes a /process/ y /optimize/. Las sedes viajan en el
+ * pedido, como el archivo: el planificador no lee la base.
+ */
+function mappingFields(file: File, mapping: ColumnMapping, params: ClusterParams, depots: Depot[]) {
   const body = new FormData();
   body.append("file", file);
   body.append("col_id", mapping.col_id);
@@ -197,6 +209,14 @@ function mappingFields(file: File, mapping: ColumnMapping, params: ClusterParams
   body.append("eps_km", String(params.eps_km));
   body.append("min_samples", String(params.min_samples));
   body.append("noise_reassign_factor", String(params.noise_reassign_factor));
+  if (params.group_by_depot && depots.length > 0) {
+    body.append("group_by_depot", "true");
+    body.append("depot_max_km", String(params.depot_max_km));
+    body.append(
+      "depots_json",
+      JSON.stringify(depots.map((depot) => ({ name: depot.name, lat: depot.lat, lon: depot.lon }))),
+    );
+  }
   return body;
 }
 
@@ -210,8 +230,9 @@ export function previewClusters(
   file: File,
   mapping: ColumnMapping,
   params: ClusterParams,
+  depots: Depot[],
 ): Promise<ProcessResponse> {
-  return post<ProcessResponse>("/process/", mappingFields(file, mapping, params));
+  return post<ProcessResponse>("/process/", mappingFields(file, mapping, params, depots));
 }
 
 /**
@@ -227,8 +248,9 @@ export async function optimize(
   params: ClusterParams,
   routing: RouteParams,
   clusterStarts: Record<number, ClusterStart>,
+  depots: Depot[],
 ): Promise<OptimizeResponse> {
-  const body = mappingFields(file, mapping, params);
+  const body = mappingFields(file, mapping, params, depots);
   body.append("provider", routing.provider);
   body.append("cluster_starts_json", JSON.stringify(clusterStarts));
   body.append("day_budget_s", String(routing.day_budget_s));

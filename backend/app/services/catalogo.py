@@ -38,7 +38,14 @@ from ..schemas import (
     VisitAge,
 )
 from . import localidades
-from .clustering import haversine_km, reassign_noise, run_dbscan
+from .clustering import (
+    DEPOT_MAX_KM,
+    cluster_by_depot,
+    haversine_km,
+    nearest_depot,
+    reassign_noise,
+    run_dbscan,
+)
 from .registro import ConflictError, NotFoundError, _clean, _now
 
 # Cuántos meses hacia atrás (contando el actual) muestra la serie de tareas,
@@ -322,20 +329,40 @@ def cluster_catalog(
     min_samples: int,
     noise_reassign_factor: float,
     palette_size: int,
+    by_depot: bool = True,
+    depot_max_km: float = DEPOT_MAX_KM,
 ) -> CatalogClusters:
-    """Agrupa todo el catálogo con el mismo DBSCAN que el planificador."""
+    """Agrupa todo el catálogo como el planificador: por zona de sede (con las
+    sedes guardadas) y, lo que queda lejos de toda sede, por cercanía."""
+    empty = CatalogClusters(
+        eps_km=eps_km, by_depot=by_depot, depot_max_km=depot_max_km,
+        cameras=[], clusters=[], noise_count=0,
+    )
     rows = conn.execute("SELECT id, lat, lon FROM camaras ORDER BY id").fetchall()
     if not rows:
-        return CatalogClusters(eps_km=eps_km, cameras=[], clusters=[], noise_count=0)
+        return empty
 
     points = pd.DataFrame([dict(row) for row in rows])
-    labels, clusters = run_dbscan(points, eps_km=eps_km, min_samples=min_samples)
-    labels, clusters = reassign_noise(
-        points, labels, clusters, max_km=eps_km * noise_reassign_factor
-    )
+    depots = list_depots(conn) if by_depot else []
+    if depots:
+        labels, clusters, _ = cluster_by_depot(
+            points, [(depot.lat, depot.lon) for depot in depots], depot_max_km,
+            eps_km, min_samples, noise_reassign_factor,
+        )
+        for cluster in clusters:
+            if cluster["depot"] is not None:
+                depot = depots[int(cluster["depot"])]
+                cluster["depot"] = {"name": depot.name, "lat": depot.lat, "lon": depot.lon}
+    else:
+        labels, clusters = run_dbscan(points, eps_km=eps_km, min_samples=min_samples)
+        labels, clusters = reassign_noise(
+            points, labels, clusters, max_km=eps_km * noise_reassign_factor
+        )
     colors = assign_colors(clusters, palette_size)
     return CatalogClusters(
         eps_km=eps_km,
+        by_depot=by_depot,
+        depot_max_km=depot_max_km,
         cameras=[
             CatalogClusterCamera(id=row["id"], cluster=int(label))
             for row, label in zip(rows, labels, strict=True)
@@ -501,19 +528,24 @@ def _months(conn: sqlite3.Connection, today: dt.date) -> list[MonthTasks]:
     return months
 
 
-def _depot_reach(cameras: list[CatalogCamera], depots: list[Depot]) -> list[DepotReach]:
-    """Para cada sede, las cámaras que tienen a esa sede como la más cercana."""
+def _depot_reach(
+    cameras: list[CatalogCamera], depots: list[Depot], max_km: float
+) -> tuple[list[DepotReach], int]:
+    """Para cada sede, las cámaras de su zona: las que la tienen como la más
+    cercana, a `max_km` o menos. Devuelve también cuántas quedan sin sede."""
     if not depots:
-        return []
+        return [], 0
     assigned: dict[int, list[float]] = {depot.id: [] for depot in depots}
+    outside = 0
     if cameras:
-        lat = np.array([camera.lat for camera in cameras])
-        lon = np.array([camera.lon for camera in cameras])
-        distances = np.vstack([haversine_km(lat, lon, depot.lat, depot.lon) for depot in depots])
-        nearest = distances.argmin(axis=0)
-        for camera_index, depot_index in enumerate(nearest):
-            assigned[depots[depot_index].id].append(float(distances[depot_index, camera_index]))
-    return [
+        points = pd.DataFrame({"lat": [c.lat for c in cameras], "lon": [c.lon for c in cameras]})
+        nearest, distance = nearest_depot(points, [(depot.lat, depot.lon) for depot in depots])
+        for depot_index, km in zip(nearest, distance, strict=True):
+            if km > max_km:
+                outside += 1
+            else:
+                assigned[depots[int(depot_index)].id].append(float(km))
+    reach = [
         DepotReach(
             id=depot.id,
             name=depot.name,
@@ -525,11 +557,17 @@ def _depot_reach(cameras: list[CatalogCamera], depots: list[Depot]) -> list[Depo
         )
         for depot in depots
     ]
+    return reach, outside
 
 
-def summary(conn: sqlite3.Connection, today: dt.date | None = None) -> CatalogSummary:
+def summary(
+    conn: sqlite3.Connection,
+    today: dt.date | None = None,
+    depot_max_km: float = DEPOT_MAX_KM,
+) -> CatalogSummary:
     today = today or dt.date.today()
     cameras = list_cameras(conn)
+    reach, outside_depots = _depot_reach(cameras, list_depots(conn), depot_max_km)
     localities = _localities(cameras)
     plans = conn.execute(
         """
@@ -569,7 +607,9 @@ def summary(conn: sqlite3.Connection, today: dt.date | None = None) -> CatalogSu
         distance_m=plans["distance_m"],
         tasks=TaskCounts(**dict(tasks)),
         months=_months(conn, today),
-        depots=_depot_reach(cameras, list_depots(conn)),
+        depots=reach,
+        depot_max_km=depot_max_km,
+        outside_depots=outside_depots,
         planned_outside_catalog=outside,
         last_import_at=last_import,
     )

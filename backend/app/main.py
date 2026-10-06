@@ -14,6 +14,7 @@ import anyio
 import numpy as np
 
 from fastapi import Depends, FastAPI, File, Form, HTTPException, UploadFile
+from pydantic import TypeAdapter, ValidationError
 
 from .auth import cripto
 from .auth import db as auth_db
@@ -35,6 +36,7 @@ from .uploads import read_upload as _read_upload
 from .schemas import (
     Camera,
     Cluster,
+    ClusterDepot,
     ClusterRoute,
     DiscardedRow,
     IngestStats,
@@ -44,7 +46,13 @@ from .schemas import (
     SuggestedMapping,
     UploadExcelResponse,
 )
-from .services.clustering import haversine_km, reassign_noise, run_dbscan
+from .services.clustering import (
+    DEPOT_MAX_KM,
+    cluster_by_depot,
+    haversine_km,
+    reassign_noise,
+    run_dbscan,
+)
 from .services.ingest import read_headers, suggest_mapping
 from .services.routing import (
     BudgetInfeasibleError,
@@ -159,22 +167,77 @@ class Clustered(NamedTuple):
     warning: str | None
 
 
+# Tope de sedes por pedido: las bases operativas son unas pocas.
+MAX_DEPOTS = 100
+_DEPOTS_ADAPTER = TypeAdapter(list[ClusterDepot])
+
+
+class DepotGrouping(NamedTuple):
+    """Agrupar por zona de sede: las sedes y hasta qué distancia llega cada una."""
+
+    depots: list[ClusterDepot]
+    max_km: float
+
+
+def _depot_grouping(
+    group_by_depot: bool, depot_max_km: float, depots_json: str | None
+) -> DepotGrouping | None:
+    """Valida las sedes que manda el frontend. El planificador no lee la base:
+    las sedes viajan en el pedido, como el archivo."""
+    if not group_by_depot:
+        return None
+    try:
+        depots = _DEPOTS_ADAPTER.validate_json(depots_json or "[]")
+    except ValidationError as exc:
+        raise HTTPException(
+            status_code=400,
+            detail="depots_json debe ser una lista de sedes {name, lat, lon} con coordenadas válidas.",
+        ) from exc
+    if len(depots) > MAX_DEPOTS:
+        raise HTTPException(status_code=400, detail=f"Como máximo {MAX_DEPOTS} sedes por pedido.")
+    return DepotGrouping(depots, depot_max_km) if depots else None
+
+
 async def _ingest_and_cluster(
     file: UploadFile,
     columns: ColumnMap,
     eps_km: float,
     min_samples: int,
     noise_reassign_factor: float,
+    grouping: DepotGrouping | None = None,
 ) -> Clustered:
-    """Lee la planilla, aparta lo realizado, valida coordenadas y agrupa con DBSCAN."""
+    """Lee la planilla, aparta lo realizado, valida coordenadas y agrupa.
+
+    Con `grouping`, cada cámara va a la zona de su sede más cercana (hasta
+    `grouping.max_km`) y sólo las que quedan lejos de toda sede se agrupan
+    con DBSCAN. Sin él, todo va por DBSCAN.
+    """
     ingested = await ingest_points(file, columns)
     points = ingested.points
     warning = ingested.warning
 
-    labels, clusters = run_dbscan(points, eps_km=eps_km, min_samples=min_samples)
-    original_labels = labels
     max_reassign_km = eps_km * noise_reassign_factor
-    labels, clusters = reassign_noise(points, labels, clusters, max_km=max_reassign_km)
+    if grouping is None:
+        labels, clusters = run_dbscan(points, eps_km=eps_km, min_samples=min_samples)
+        original_labels = labels
+        labels, clusters = reassign_noise(points, labels, clusters, max_km=max_reassign_km)
+        reassigned = (original_labels == -1) & (labels != -1)
+    else:
+        labels, clusters, reassigned = cluster_by_depot(
+            points,
+            [(depot.lat, depot.lon) for depot in grouping.depots],
+            grouping.max_km,
+            eps_km,
+            min_samples,
+            noise_reassign_factor,
+        )
+        clusters = [
+            {
+                **cluster,
+                "depot": None if cluster["depot"] is None else grouping.depots[int(cluster["depot"])],
+            }
+            for cluster in clusters
+        ]
 
     cameras = [
         Camera(
@@ -185,10 +248,10 @@ async def _ingest_and_cluster(
             node=record["node"],
             observation=record["observation"],
             cluster=int(label),
-            reassigned=bool(original_label == -1 and label != -1),
+            reassigned=bool(was_reassigned),
         )
-        for record, label, original_label in zip(
-            points.to_dict("records"), labels, original_labels, strict=True
+        for record, label, was_reassigned in zip(
+            points.to_dict("records"), labels, reassigned, strict=True
         )
     ]
 
@@ -196,9 +259,14 @@ async def _ingest_and_cluster(
     if sin_rutear:
         # No hay silencio ante ruido sin cobertura: cada cámara sin recorrido
         # tiene que quedar explícita, no perderse en las estadísticas.
+        lejos_de_sedes = (
+            f"a más de {grouping.max_km:,.0f} km de toda sede y "
+            if grouping is not None
+            else ""
+        )
         aviso_ruido = (
-            f"{sin_rutear} cámara(s) quedaron sin cluster cercano (a más de "
-            f"{max_reassign_km:,.1f} km) y no entran en ningún recorrido."
+            f"{sin_rutear} cámara(s) quedaron {lejos_de_sedes}sin cluster cercano "
+            f"(a más de {max_reassign_km:,.1f} km) y no entran en ningún recorrido."
         )
         warning = f"{warning} {aviso_ruido}" if warning else aviso_ruido
 
@@ -241,6 +309,9 @@ async def process(
     eps_km: float = Form(1.0, gt=0, le=500),
     min_samples: int = Form(2, ge=1, le=1000),
     noise_reassign_factor: float = Form(3.0, ge=0, le=20),
+    group_by_depot: bool = Form(False),
+    depot_max_km: float = Form(DEPOT_MAX_KM, ge=1, le=500),
+    depots_json: str | None = Form(None),
 ) -> ProcessResponse:
     """Ingesta la planilla completa, valida coordenadas y agrupa con DBSCAN.
 
@@ -252,13 +323,18 @@ async def process(
     llamadas: mantiene el backend sin estado y evita limpiar temporales.
     Con `col_done` (Excel de seguimiento), las filas tildadas como realizadas
     se apartan y sólo se agrupa lo pendiente.
+
+    Con `group_by_depot` y las sedes en `depots_json` (`[{name, lat, lon}]`),
+    cada cámara va a la zona de su sede más cercana, hasta `depot_max_km`; el
+    cluster lleva su sede y el frontend la usa como punto de partida.
     """
     columns = ColumnMap(
         col_id, col_lat, col_lon, col_coords, coord_order, col_label,
         col_node, col_obs, col_done,
     )
     result = await _ingest_and_cluster(
-        file, columns, eps_km, min_samples, noise_reassign_factor
+        file, columns, eps_km, min_samples, noise_reassign_factor,
+        _depot_grouping(group_by_depot, depot_max_km, depots_json),
     )
 
     return ProcessResponse(
@@ -583,6 +659,9 @@ async def optimize(
     eps_km: float = Form(1.0, gt=0, le=500),
     min_samples: int = Form(2, ge=1, le=1000),
     noise_reassign_factor: float = Form(3.0, ge=0, le=20),
+    group_by_depot: bool = Form(False),
+    depot_max_km: float = Form(DEPOT_MAX_KM, ge=1, le=500),
+    depots_json: str | None = Form(None),
     provider: str = Form("auto", pattern="^(auto|osrm|haversine)$"),
     cluster_starts_json: str = Form(...),
     day_budget_s: float = Form(28800, gt=0, le=86400),
@@ -623,7 +702,8 @@ async def optimize(
         col_node, col_obs, col_done,
     )
     result = await _ingest_and_cluster(
-        file, columns, eps_km, min_samples, noise_reassign_factor
+        file, columns, eps_km, min_samples, noise_reassign_factor,
+        _depot_grouping(group_by_depot, depot_max_km, depots_json),
     )
 
     cluster_starts = _parse_cluster_starts(cluster_starts_json)

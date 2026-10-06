@@ -176,6 +176,7 @@ export default function ControlPanel(props: Props) {
         <ClusterStep
           params={props.params}
           preview={preview}
+          depotCount={props.depots.length}
           canPreview={mappingReady && !isLoading}
           isLoading={isLoading}
           onParamsChange={props.onParamsChange}

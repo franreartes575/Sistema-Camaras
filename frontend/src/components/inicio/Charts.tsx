@@ -404,21 +404,34 @@ export function VisitAgeBars({ summary }: { summary: CatalogSummary }) {
   );
 }
 
-export function DepotReachBars({ depots }: { depots: DepotReach[] }) {
-  return (
-    <BarList
-      empty="Todavía no hay sedes cargadas."
-      rows={depots.map((depot) => ({
-        key: String(depot.id),
-        label: depot.name,
-        value: depot.cameras,
-        detail:
-          depot.average_km === null
-            ? "ninguna cámara la tiene como la más cercana"
-            : `a ${depot.average_km.toFixed(1)} km en promedio · la más lejana a ${depot.max_km?.toFixed(1)} km`,
-      }))}
-    />
-  );
+export function DepotReachBars({
+  depots,
+  outside,
+  maxKm,
+}: {
+  depots: DepotReach[];
+  /** Cámaras a más de `maxKm` de toda sede. */
+  outside: number;
+  maxKm: number;
+}) {
+  const rows = depots.map((depot) => ({
+    key: String(depot.id),
+    label: depot.name,
+    value: depot.cameras,
+    detail:
+      depot.average_km === null
+        ? `ninguna cámara a menos de ${maxKm} km la tiene como la más cercana`
+        : `a ${depot.average_km.toFixed(1)} km en promedio · la más lejana a ${depot.max_km?.toFixed(1)} km`,
+  }));
+  if (depots.length > 0 && outside > 0) {
+    rows.push({
+      key: "sin-sede",
+      label: "Sin sede",
+      value: outside,
+      detail: `a más de ${maxKm} km de toda sede: se agrupan por cercanía`,
+    });
+  }
+  return <BarList empty="Todavía no hay sedes cargadas." rows={rows} />;
 }
 
 // ---------------------------------------------------------------- Planes

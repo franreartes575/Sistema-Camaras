@@ -25,8 +25,10 @@ servicios pagos: ninguna coordenada de las cámaras sale del equipo.
    `.csv`).
 2. Con una planilla, el backend lee sólo los encabezados y sugiere qué columna
    es cada cosa; desde el catálogo el mapeo sale solo.
-3. Ajustás el radio de agrupamiento (arranca en 20 km: junta los pueblos
-   que atiende una misma sede).
+3. Las cámaras se agrupan **por zona de sede**: cada una va a la sede más
+   cercana si está a 60 km o menos, y esa sede es su punto de partida. Las que
+   quedan lejos de toda sede se agrupan por cercanía (20 km) y su salida se
+   elige a mano.
 4. DBSCAN agrupa las cámaras por cercanía geográfica real.
 5. OR-Tools resuelve el orden de visita óptimo dentro de cada grupo.
 6. El mapa dibuja cada recorrido y numera las paradas.
@@ -49,8 +51,10 @@ cámaras, de los planes y del avance de las tareas.
   Planificar con sus cámaras ya elegidas.
 - **Gráficos**: tareas por mes y por estado, antigüedad de la última visita y
   cámaras por sede más cercana. Abajo, los últimos planes.
-- **Mapa**: todo el catálogo con un color por cluster (el mismo DBSCAN del
-  planificador, con radio ajustable) y las sedes marcadas. Con más clusters
+- **Mapa**: todo el catálogo con un color por cluster y las sedes marcadas.
+  Por defecto se agrupa por zona de sede (hasta 60 km, ajustable); lo que
+  queda lejos de toda sede, por cercanía, con borde punteado. También se
+  puede ver sólo por cercanía. Con más clusters
   que colores, los vecinos nunca comparten color y cada uno lleva su rótulo
   "C n".
 
