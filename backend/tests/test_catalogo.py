@@ -371,6 +371,23 @@ def test_clusters_del_catalogo_con_colores_distintos_entre_vecinos(client) -> No
     assert len(colores) == 2
 
 
+def test_una_camara_suelta_cercana_se_suma_al_cluster_por_defecto(client) -> None:
+    """A ~1,4 radios de un grupo, la cámara suelta entra; con factor 1 queda afuera."""
+    filas = [_fila(f"A-{i}", -24.75 + i * 0.002, -65.45) for i in range(4)]
+    filas += [_fila("Cerca", -24.744 + 0.126, -65.45)]  # ~14 km del miembro más cercano
+    _importar(client, filas)
+
+    por_defecto = client.get("/catalogo/clusters", params={"eps_km": 10}).json()
+    estricto = client.get(
+        "/catalogo/clusters", params={"eps_km": 10, "noise_reassign_factor": 1}
+    ).json()
+
+    asignada = {c["id"]: c["cluster"] for c in por_defecto["cameras"]}
+    suelta = {c["id"]: c["cluster"] for c in estricto["cameras"]}
+    assert asignada["Cerca"] == asignada["A-0"] != -1
+    assert suelta["Cerca"] == -1
+
+
 def test_clusters_con_el_catalogo_vacio(client) -> None:
     datos = client.get("/catalogo/clusters").json()
     assert datos == {
