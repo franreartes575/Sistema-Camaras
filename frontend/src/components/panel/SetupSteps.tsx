@@ -46,9 +46,9 @@ export function ClusterStep({
         label="Radio de vecindad"
         value={params.eps_km}
         display={`${params.eps_km} km`}
-        min={0.1}
-        max={20}
-        step={0.1}
+        min={0.5}
+        max={50}
+        step={0.5}
         onChange={(eps_km) => onParamsChange({ ...params, eps_km })}
       />
       <details className="rounded-lg border border-slate-800 px-3 py-2 open:pb-3">

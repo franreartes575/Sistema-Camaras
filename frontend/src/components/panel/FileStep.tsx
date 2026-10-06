@@ -134,7 +134,7 @@ function UploadStep({
 
   return (
     <>
-      <label className="group flex cursor-pointer items-center gap-3 rounded-lg border border-dashed border-slate-700 bg-slate-900/60 px-3 py-3 transition hover:border-sky-400/60 hover:bg-slate-900 focus-within:border-sky-400">
+      <label className="group relative flex cursor-pointer items-center gap-3 rounded-lg border border-dashed border-slate-700 bg-slate-900/60 px-3 py-3 transition hover:border-sky-400/60 hover:bg-slate-900 focus-within:border-sky-400">
         <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-md bg-sky-500/10 text-sky-300">
           <IconUpload className="h-5 w-5" />
         </span>

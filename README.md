@@ -25,7 +25,8 @@ servicios pagos: ninguna coordenada de las cámaras sale del equipo.
    `.csv`).
 2. Con una planilla, el backend lee sólo los encabezados y sugiere qué columna
    es cada cosa; desde el catálogo el mapeo sale solo.
-3. Ajustás el radio de agrupamiento.
+3. Ajustás el radio de agrupamiento (arranca en 20 km: junta los pueblos
+   que atiende una misma sede).
 4. DBSCAN agrupa las cámaras por cercanía geográfica real.
 5. OR-Tools resuelve el orden de visita óptimo dentro de cada grupo.
 6. El mapa dibuja cada recorrido y numera las paradas.

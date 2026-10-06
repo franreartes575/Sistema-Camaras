@@ -133,7 +133,7 @@ def selection_workbook(selection: CatalogSelection, conn: Db) -> Response:
 @router.get("/clusters", response_model=CatalogClusters)
 async def clusters(
     conn: Db,
-    eps_km: Annotated[float, Query(gt=0, le=500)] = 5.0,
+    eps_km: Annotated[float, Query(gt=0, le=500)] = 20.0,
     min_samples: Annotated[int, Query(ge=1, le=1000)] = 2,
     noise_reassign_factor: Annotated[float, Query(ge=0, le=20)] = 3.0,
     colores: Annotated[int, Query(ge=1, le=20, description="Colores de la paleta")] = 8,

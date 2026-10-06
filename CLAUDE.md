@@ -361,6 +361,23 @@ navegador lo bloquea en silencio (queda sólo un error en la consola). El
 matcher excluye `/api`: si el proxy corriera ahí, Next retendría en memoria
 los cuerpos de las subidas (tope de 10 MB por defecto).
 
+### El radio de agrupamiento arranca en 20 km
+
+En Salta los pueblos que atiende una misma sede quedan a más de 5 km entre sí
+(Orán, Pichanal, Yrigoyen): con el radio viejo de 5 km cada uno era un cluster
+aparte, mientras que en Tartagal varios quedaban encadenados en uno solo. Por
+eso el planificador (`params.eps_km` en `page.tsx`) y el mapa del Inicio
+arrancan en 20 km, y `GET /catalogo/clusters` usa el mismo valor por defecto.
+
+### Un `sr-only` necesita un ancestro `relative`
+
+`sr-only` es `position: absolute`. Sin un ancestro posicionado, el input se
+ubica respecto del documento, en su lugar dentro de un panel con scroll, y
+estira la página más allá de `h-dvh`: aparece un hueco abajo y el encabezado
+se va de la vista. Las zonas para soltar archivos (`<label>` con un `<input
+type="file" className="sr-only">`) llevan `relative`, y `<main>` lleva
+`overflow-hidden` para que la página nunca se desplace entera.
+
 ### Avisos de plausibilidad
 
 `bounding_span_km()` mide cuánto abarcan los puntos válidos. Si supera

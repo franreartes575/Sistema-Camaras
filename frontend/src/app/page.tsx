@@ -190,9 +190,10 @@ function Aplicacion() {
   const [fileOrigin, setFileOrigin] = useState<FileOrigin | null>(null);
   const [upload, setUpload] = useState<UploadExcelResponse | null>(null);
   const [mapping, setMapping] = useState<ColumnMapping>(EMPTY_MAPPING);
-  // 5 km agrupa una ciudad entera; con 1 km casi nada llega a formar grupo.
+  // 20 km junta los pueblos que atiende una misma sede (Orán con Pichanal e
+  // Yrigoyen, por ejemplo); con 5 km cada pueblo quedaba como un cluster aparte.
   const [params, setParams] = useState<ClusterParams>({
-    eps_km: 5,
+    eps_km: 20,
     min_samples: 2,
     noise_reassign_factor: 3,
   });
@@ -553,7 +554,7 @@ function Aplicacion() {
     }`;
 
   return (
-    <main className="flex h-dvh flex-col bg-slate-950 text-slate-100">
+    <main className="flex h-dvh flex-col overflow-hidden bg-slate-950 text-slate-100">
       <header className="flex items-center justify-between gap-2 border-b border-slate-800 bg-slate-950 px-4 py-2.5 sm:gap-3 md:px-5">
         {/* En el celular no entra junto a las secciones, la vista y Salir. */}
         <div className="hidden min-w-0 items-center gap-2.5 sm:flex">
