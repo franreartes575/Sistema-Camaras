@@ -37,12 +37,15 @@ function dayState(routes: RouteSummary[], today: string): RouteState {
 
 export default function DayPicker({
   routes,
+  dayColors,
   selected,
   today,
   onSetMany,
   onReplace,
 }: {
   routes: RouteSummary[];
+  /** Color de cada fecha: el mismo que lleva en el mapa. */
+  dayColors: Record<string, string>;
   selected: Set<number>;
   today: string;
   onSetMany: (ids: number[], on: boolean) => void;
@@ -115,7 +118,7 @@ export default function DayPicker({
                     aria-pressed={on}
                     onClick={() => onSetMany(ids, !on)}
                     title={`${formatLongDay(date)}${date === today ? " (hoy)" : ""} · ${dayRoutes.length} recorrido(s) · ${STATE_LABEL[state].toLowerCase()}${faltan > 0 ? ` (faltan ${faltan})` : ""}`}
-                    className={`flex flex-col items-center rounded-md px-1 pb-1 pt-1.5 text-slate-100 transition focus-visible:outline-2 focus-visible:outline-sky-300 ${
+                    className={`flex flex-col items-center rounded-md px-1 pb-1 pt-1 text-slate-100 transition focus-visible:outline-2 focus-visible:outline-sky-300 ${
                       on
                         ? "bg-sky-500/25 ring-1 ring-sky-400"
                         : partial
@@ -123,6 +126,11 @@ export default function DayPicker({
                           : "bg-slate-800/70 hover:bg-slate-700"
                     }`}
                   >
+                    <span
+                      aria-hidden="true"
+                      className="mb-1 h-1.5 w-full rounded-full"
+                      style={{ backgroundColor: dayColors[date] }}
+                    />
                     <span className={`text-sm tabular-nums ${date === today ? "font-bold text-sky-200" : "font-semibold"}`}>
                       {Number(date.slice(8))}
                     </span>
@@ -140,7 +148,7 @@ export default function DayPicker({
 
       <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-[10px] text-slate-500">
         <span className="font-medium text-slate-400">
-          {daysOn} de {dates.length} días
+          {daysOn} de {dates.length} días · la barra de arriba es su color en el mapa
         </span>
         {STATE_ORDER.map((state) => (
           <span key={state} className="inline-flex items-center gap-1">
