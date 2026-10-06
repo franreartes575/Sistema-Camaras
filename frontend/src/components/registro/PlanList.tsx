@@ -1,12 +1,12 @@
 "use client";
 
-/** Pestaña Planes: cada plan guardado con su avance, para filtrar, renombrar o borrar. */
+/** Pestaña Planes: cada plan guardado con su avance, para verlo en el mapa, renombrar o borrar. */
 
 import { useState } from "react";
 
 import { StackedBar } from "@/components/registro/Summary";
 import { INPUT_CLASS } from "@/components/ui/controls";
-import { IconPencil, IconTrash } from "@/components/ui/icons";
+import { IconDownload, IconPencil, IconTrash } from "@/components/ui/icons";
 import { formatDistance, formatShortDate, formatTimestamp, percent } from "@/lib/format";
 import { missing, type PlanSummary } from "@/lib/registro";
 
@@ -20,6 +20,7 @@ function PlanCard({
   onFilter,
   onRename,
   onDelete,
+  onDownload,
 }: {
   plan: PlanSummary;
   isFiltered: boolean;
@@ -27,6 +28,7 @@ function PlanCard({
   onFilter: () => void;
   onRename: (name: string) => void;
   onDelete: () => void;
+  onDownload: () => void;
 }) {
   const [draft, setDraft] = useState<string | null>(null);
   const [confirming, setConfirming] = useState(false);
@@ -116,7 +118,10 @@ function PlanCard({
       ) : (
         <div className="flex flex-wrap gap-1">
           <button type="button" onClick={onFilter} className={ACTION} aria-pressed={isFiltered}>
-            {isFiltered ? "Ver todos los planes" : "Filtrar por este plan"}
+            {isFiltered ? "Ver todos los planes" : "Ver este plan en el mapa"}
+          </button>
+          <button type="button" onClick={onDownload} className={ACTION}>
+            <IconDownload className="h-3.5 w-3.5" /> Excel actualizado
           </button>
           <button type="button" onClick={() => setDraft(plan.name)} className={ACTION}>
             <IconPencil className="h-3.5 w-3.5" /> Renombrar
@@ -141,6 +146,7 @@ export default function PlanList({
   onFilter,
   onRename,
   onDelete,
+  onDownload,
 }: {
   plans: PlanSummary[];
   filteredPlanId: number | null;
@@ -148,6 +154,7 @@ export default function PlanList({
   onFilter: (planId: number | null) => void;
   onRename: (planId: number, name: string) => void;
   onDelete: (planId: number) => void;
+  onDownload: (planId: number) => void;
 }) {
   if (plans.length === 0) {
     return (
@@ -168,6 +175,7 @@ export default function PlanList({
           onFilter={() => onFilter(filteredPlanId === plan.id ? null : plan.id)}
           onRename={(name) => onRename(plan.id, name)}
           onDelete={() => onDelete(plan.id)}
+          onDownload={() => onDownload(plan.id)}
         />
       ))}
     </ul>

@@ -106,6 +106,16 @@ Por eso:
 - El rate limiter de `/export/` vive en su router: si agregás otro, sumalo a
   `_LIMITADORES` en `tests/conftest.py`.
 
+El registro también carga la **planilla de órdenes de trabajo** (indicador
+"Cierre": REALIZADO / NO REALIZADO). `follow_up_mapping` toma `ID Contrato` como
+ID de cámara (no `N° OT`), `Obs. Cierre` como observación (`Observaciones` es la
+instrucción de la orden), `Estado No Realizado` como motivo y `NODO` como nodo
+migrado. Reglas en `registro._orders_update`: el nodo migrado se carga sólo en las
+realizadas; la observación, si no se realizó (motivo + lo que escribió el técnico) o
+si el nodo difiere del preliminar de la parada (o no hay con qué compararlo). El
+formato anterior ("Realizado") no cambia. Esa planilla no trae coordenadas de lo
+no realizado: sirve para el Registro, no para replanificar sin él.
+
 La jornada con menos cámaras queda siempre última (`_lightest_day_last` en
 `vrp.py`): es la que tiene lugar para sumarle lo que quede pendiente.
 

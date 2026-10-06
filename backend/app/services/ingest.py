@@ -40,7 +40,9 @@ _COORDS_PATTERNS = (
 # el técnico; el preliminar es el planificado ("Nodo a Migrar" en cnMaestro).
 _NODE_PATTERNS = (r"nodo\s*pre", r"nodo\s*a\s*migrar", r"^nodo(?!.*se\s+migr)")
 _OBS_PATTERNS = (r"observ", r"coment")
-_DONE_PATTERNS = (r"realizad", r"^hecho", r"^completad")
+# "Cierre" es el indicador de las órdenes de trabajo (REALIZADO / NO REALIZADO).
+# "Estado No Realizado" es el motivo, no el indicador: de ahí el lookbehind.
+_DONE_PATTERNS = (r"^cierre$", r"(?<!no\s)realizad", r"^hecho", r"^completad")
 # Formas de tildar "Realizado" que cuentan como tarea hecha.
 _DONE_MARKS = frozenset(
     {"si", "sí", "s", "x", "✓", "✔", "☑", "true", "verdadero", "1", "ok",
@@ -52,8 +54,15 @@ _NOT_DONE_MARKS = frozenset(
     {"no", "n", "false", "falso", "0", "✗", "✘", "no realizado", "no realizada"}
 )
 # Columnas que lee el registro al cargar un seguimiento.
-_DATE_PATTERNS = (r"fecha",)
-_MIGRATED_PATTERNS = (r"se\s+migr", r"nodo\s+migrado", r"nodo\s+(final|real)")
+_DATE_PATTERNS = (r"fecha\s*programaci", r"fecha")
+# En las órdenes de trabajo, el nodo al que se migró viene como "NODO".
+_MIGRATED_PATTERNS = (r"se\s+migr", r"nodo\s+migrado", r"nodo\s+(final|real)", r"^nodo$")
+# Planilla de órdenes de trabajo: el ID de la cámara es "ID Contrato" (no el
+# "N° OT"), la observación del técnico es "Obs. Cierre" ("Observaciones" es la
+# instrucción de la orden) y "Estado No Realizado" da el motivo.
+_ORDER_ID_PATTERNS = (r"^id\s*contrato",)
+_ORDER_OBS_PATTERNS = (r"obs\.?\s*cierre",)
+_ORDER_REASON_PATTERNS = (r"estado\s+no\s+realizad", r"^motivo")
 # Hasta 1e9 cubre microgrados (1e6) y las exportaciones con más precisión.
 _MAX_COORD_SCALE_EXPONENT = 9
 
@@ -159,12 +168,18 @@ def follow_up_mapping(columns: list[str]) -> dict[str, str | None]:
     """
     base = suggest_mapping(columns)
     return {
-        "id": base["id"],
+        "id": _match(columns, _ORDER_ID_PATTERNS) or base["id"],
         "done": base["done"],
-        "observation": base["observation"],
+        "observation": _match(columns, _ORDER_OBS_PATTERNS) or base["observation"],
+        "reason": _match(columns, _ORDER_REASON_PATTERNS),
         "migrated_node": _match(columns, _MIGRATED_PATTERNS),
         "date": _match(columns, _DATE_PATTERNS),
     }
+
+
+def is_orders_format(done_column: str | None) -> bool:
+    """True si el indicador es "Cierre": la planilla de órdenes de trabajo."""
+    return bool(done_column) and done_column.strip().lower() == "cierre"
 
 
 def split_done(frame: pd.DataFrame, col_done: str | None) -> tuple[pd.DataFrame, int]:
