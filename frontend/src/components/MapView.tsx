@@ -14,7 +14,7 @@ import "maplibre-gl/dist/maplibre-gl.css";
 
 import type { Camera, Cluster, ClusterRoute, ClusterStart, Depot } from "@/lib/api";
 import { formatDayLabel } from "@/lib/format";
-import { clusterOutlines } from "@/lib/geo";
+import { circlePolygon } from "@/lib/geo";
 import { routeKey } from "@/lib/planDates";
 import { OSM_STYLE } from "@/lib/mapStyle";
 import {
@@ -122,17 +122,17 @@ export default function MapView({
     [cameras, stopByCamera],
   );
 
-  // El contorno sigue la forma real de cada cluster (ver `clusterOutlines`).
-  const boundaries = useMemo(() => {
-    const outlines = clusterOutlines(cameras, (camera) => camera.cluster);
-    return {
+  const boundaries = useMemo(
+    () => ({
       type: "FeatureCollection" as const,
-      features: clusters.flatMap((cluster) => {
-        const geometry = outlines.get(cluster.id);
-        return geometry ? [{ type: "Feature" as const, geometry, properties: { cluster: cluster.id } }] : [];
-      }),
-    };
-  }, [cameras, clusters]);
+      features: clusters.map((cluster) => ({
+        type: "Feature" as const,
+        geometry: circlePolygon(cluster.centroid_lat, cluster.centroid_lon, cluster.radius_km),
+        properties: { cluster: cluster.id },
+      })),
+    }),
+    [clusters],
+  );
 
   const depotPoints = useMemo(
     () => ({
