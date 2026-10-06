@@ -13,8 +13,10 @@ la traducción vive acá, en los alias de cada SELECT.
 import datetime as dt
 import hashlib
 import json
+import re
 import sqlite3
 import tempfile
+import unicodedata
 from collections import Counter
 from dataclasses import dataclass
 from pathlib import Path
@@ -34,7 +36,7 @@ from ..schemas import (
     TaskUpdate,
 )
 from .export import read_plan_id
-from .ingest import follow_up_mapping, read_dataframe, reported_status
+from .ingest import follow_up_mapping, is_orders_format, read_dataframe, reported_status
 
 # Tope de filas por consulta: varios meses de operación entran holgados, y un
 # filtro mal puesto no arma una respuesta de cientos de MB.
@@ -413,6 +415,7 @@ class _Candidate:
     status: str
     observation: str | None
     migrated_node: str | None
+    preliminary_node: str | None = None
 
 
 @dataclass(frozen=True)
@@ -422,6 +425,9 @@ class _FollowUpRow:
     status: str | None
     observation: str | None
     migrated_node: str | None
+    reason: str | None = None
+    # Planilla de órdenes de trabajo ("Cierre"): reglas propias, ver `_orders_update`.
+    orders: bool = False
 
 
 def _cell_text(value: object) -> str | None:
@@ -467,6 +473,7 @@ def _read_follow_up(filename: str, raw: bytes) -> list[_FollowUpRow]:
             "de la cámara y la columna Realizado."
         )
     frame.columns = [str(column) for column in frame.columns]
+    orders = is_orders_format(columns["done"])
 
     def get(record: dict, role: str) -> object:
         column = columns[role]
@@ -484,9 +491,59 @@ def _read_follow_up(filename: str, raw: bytes) -> list[_FollowUpRow]:
                 status=reported_status(get(record, "done")),
                 observation=_cell_text(get(record, "observation")),
                 migrated_node=_cell_text(get(record, "migrated_node")),
+                reason=_cell_text(get(record, "reason")),
+                orders=orders,
             )
         )
     return rows
+
+
+def _plain(text: str) -> str:
+    """Texto sin acentos, mayúsculas ni signos, para compararlo con otro."""
+    decomposed = unicodedata.normalize("NFKD", text)
+    letters = "".join(char for char in decomposed if not unicodedata.combining(char))
+    return re.sub(r"[^a-z0-9]+", " ", letters.casefold()).strip()
+
+
+def _not_done_observation(reason: str | None, text: str | None) -> str | None:
+    """Motivo de la orden no realizada más lo que escribió el técnico.
+
+    El técnico suele repetir el motivo ("FIN DE TURNO" / "Fin de turno"): en ese
+    caso queda uno solo.
+    """
+    reason = reason.strip().capitalize() if reason else None
+    if reason and text and _plain(reason) == _plain(text):
+        text = None
+    if reason and text:
+        return f"{reason}. {text}"
+    return reason or text
+
+
+def _orders_update(
+    row: _FollowUpRow, target: _Candidate
+) -> tuple[str, str | None, str | None]:
+    """Estado, observación y nodo migrado de una tarea, según la orden de trabajo.
+
+    - Realizada: el nodo migrado es el que informa la orden. La observación del
+      técnico se guarda sólo si el nodo es distinto del preliminar (o no hay
+      con qué compararlo): si coincide, lo hecho es lo planificado.
+    - No realizada: se guarda el motivo y la observación; no hay nodo migrado.
+    - Sin novedad: no cambia nada.
+    """
+    status = row.status or target.status
+    observation, migrated = target.observation, target.migrated_node
+    if row.status == "realizada":
+        migrated = row.migrated_node or migrated
+        same_node = bool(
+            migrated
+            and target.preliminary_node
+            and _plain(migrated) == _plain(target.preliminary_node)
+        )
+        if row.observation and not same_node:
+            observation = row.observation
+    elif row.status == "no_realizada":
+        observation = _not_done_observation(row.reason, row.observation) or observation
+    return status, observation, migrated
 
 
 def _load_candidates(
@@ -498,7 +555,7 @@ def _load_candidates(
         chunk = ids[start:start + _IN_CHUNK]
         sql = f"""
             SELECT pa.id, pa.camara_id, pa.estado, pa.observacion, pa.nodo_migrado,
-                   r.plan_id, r.fecha
+                   pa.nodo_preliminar, r.plan_id, r.fecha
             FROM paradas pa JOIN recorridos r ON r.id = pa.recorrido_id
             WHERE pa.camara_id IN ({', '.join('?' for _ in chunk)})
         """
@@ -512,6 +569,7 @@ def _load_candidates(
                     id=row["id"], plan_id=row["plan_id"],
                     date=dt.date.fromisoformat(row["fecha"]), status=row["estado"],
                     observation=row["observacion"], migrated_node=row["nodo_migrado"],
+                    preliminary_node=row["nodo_preliminar"],
                 )
             )
     return by_camera
@@ -540,7 +598,9 @@ def import_follow_up(conn: sqlite3.Connection, filename: str, raw: bytes) -> Fol
     si el Excel salió del registro y trae la hoja oculta). "Sí" la marca
     realizada y "No" no realizada; una celda vacía no cambia el estado, pero la
     observación y el nodo migrado se actualizan igual si vienen cargados.
-    Cargar el mismo archivo dos veces deja el registro igual.
+    La planilla de órdenes de trabajo (indicador "Cierre") tiene sus propias
+    reglas: ver `_orders_update`. Cargar el mismo archivo dos veces deja el
+    registro igual.
     """
     rows = _read_follow_up(filename, raw)
     plan_hint = read_plan_id(filename, raw)
@@ -575,9 +635,12 @@ def import_follow_up(conn: sqlite3.Connection, filename: str, raw: bytes) -> Fol
                 no_news += 1
             for target in targets:
                 touched_plans[target.plan_id] += 1
-                status = row.status or target.status
-                observation = row.observation or target.observation
-                migrated = row.migrated_node or target.migrated_node
+                if row.orders:
+                    status, observation, migrated = _orders_update(row, target)
+                else:
+                    status = row.status or target.status
+                    observation = row.observation or target.observation
+                    migrated = row.migrated_node or target.migrated_node
                 if (status, observation, migrated) == (
                     target.status, target.observation, target.migrated_node
                 ):

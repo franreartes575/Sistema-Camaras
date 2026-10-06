@@ -663,6 +663,7 @@ def test_reconoce_las_columnas_del_excel_exportado() -> None:
         "id": "ID de la cámara",
         "done": "Realizado",
         "observation": "Observación",
+        "reason": None,
         "migrated_node": "Nodo al cual se migró",
         "date": "Fecha de planificación",
     }
@@ -671,3 +672,145 @@ def test_reconoce_las_columnas_del_excel_exportado() -> None:
 def test_la_base_de_los_tests_no_es_la_de_data() -> None:
     """La fixture autouse aísla cada test en una base temporal."""
     assert "data" not in config.DB_PATH.split("/")[-2:]
+
+
+# --------------------------------------------------------------------------
+# Planilla de órdenes de trabajo (indicador "Cierre")
+# --------------------------------------------------------------------------
+
+_ORDEN_GENERICA = "MIGRAR DESDE EL MARTEAREANA A CUALQUIER NODO DISPONIBLE."
+
+
+def _ordenes(filas: list[dict]) -> bytes:
+    """Excel de órdenes de trabajo con las columnas que importan, como lo baja el sistema."""
+    base = {
+        "N° OT": 0, "Estado": "Cerrada", "Fecha Programación": "5/10/2026",
+        "Fecha Creación": "3/10/2026 12:35", "Observaciones": _ORDEN_GENERICA,
+        "Obs. Cierre": None, "Estado No Realizado": None, "NODO": None, "COORDENADAS": None,
+    }
+    salida = io.BytesIO()
+    pd.DataFrame(
+        [{**base, "N° OT": 120000003370 + i, **fila} for i, fila in enumerate(filas)]
+    ).to_excel(salida, index=False, engine="openpyxl")
+    return salida.getvalue()
+
+
+def _plan_de_ordenes(client: TestClient) -> dict:
+    plan = _plan(
+        {
+            **_jornada("2026-10-05", 1, []),
+            "stops": [
+                _parada("A-1", node="Solidaridad"),
+                _parada("A-2", node="PTP Norte"),
+                _parada("A-3", node="Solidaridad"),
+                _parada("A-4"),
+            ],
+        }
+    )
+    return _guardar(client, plan)
+
+
+def test_las_ordenes_se_cruzan_por_id_contrato_y_no_por_numero_de_ot(client: TestClient) -> None:
+    guardado = _plan_de_ordenes(client)
+    contenido = _ordenes([
+        {"ID Contrato": "A-1", "Cierre": "REALIZADO", "NODO": "SOLIDARIDAD"},
+    ])
+
+    resultado = _cargar(client, contenido)
+
+    assert (resultado["matched"], resultado["unmatched"], resultado["done"]) == (1, 0, 1)
+    assert _tareas(client)[("A-1", guardado["id"])]["status"] == "realizada"
+
+
+def test_orden_realizada_con_el_nodo_preliminar_no_guarda_observacion(client: TestClient) -> None:
+    """Lo hecho es lo planificado: sólo se anota el nodo (sin mirar mayúsculas)."""
+    guardado = _plan_de_ordenes(client)
+    _cargar(client, _ordenes([{
+        "ID Contrato": "A-1", "Cierre": "REALIZADO", "NODO": "SOLIDARIDAD",
+        "Obs. Cierre": "Se realiza asistencia con éxito",
+    }]))
+
+    tarea = _tareas(client)[("A-1", guardado["id"])]
+    assert (tarea["status"], tarea["migrated_node"]) == ("realizada", "SOLIDARIDAD")
+    assert tarea["observation"] is None
+
+
+def test_orden_realizada_en_otro_nodo_guarda_la_observacion(client: TestClient) -> None:
+    guardado = _plan_de_ordenes(client)
+    _cargar(client, _ordenes([{
+        "ID Contrato": "A-2", "Cierre": "REALIZADO", "NODO": "SOLIDARIDAD",
+        "Obs. Cierre": "Se migra de nodo y se coloca enlace nuevo",
+    }]))
+
+    tarea = _tareas(client)[("A-2", guardado["id"])]
+    assert (tarea["status"], tarea["migrated_node"]) == ("realizada", "SOLIDARIDAD")
+    assert tarea["observation"] == "Se migra de nodo y se coloca enlace nuevo"
+
+
+def test_orden_realizada_sin_nodo_preliminar_guarda_la_observacion(client: TestClient) -> None:
+    """Sin nodo con qué comparar no se puede decir que coincide: no se pierde lo escrito."""
+    guardado = _plan_de_ordenes(client)
+    _cargar(client, _ordenes([{
+        "ID Contrato": "A-4", "Cierre": "REALIZADO", "NODO": "SOLIDARIDAD",
+        "Obs. Cierre": "Se instala enlace",
+    }]))
+
+    assert _tareas(client)[("A-4", guardado["id"])]["observation"] == "Se instala enlace"
+
+
+def test_orden_no_realizada_guarda_motivo_y_observacion_sin_nodo(client: TestClient) -> None:
+    guardado = _plan_de_ordenes(client)
+    resultado = _cargar(client, _ordenes([{
+        "ID Contrato": "A-3", "Cierre": "NO REALIZADO", "Estado No Realizado": "SIN LINEA DE VISTA",
+        "Obs. Cierre": "No se realiza migración: requiere una triangulación",
+        "NODO": "SOLIDARIDAD",
+    }]))
+
+    tarea = _tareas(client)[("A-3", guardado["id"])]
+    assert resultado["not_done"] == 1
+    assert tarea["status"] == "no_realizada"
+    assert tarea["observation"] == (
+        "Sin linea de vista. No se realiza migración: requiere una triangulación"
+    )
+    assert tarea["migrated_node"] is None
+
+
+def test_orden_no_realizada_no_repite_el_motivo_si_el_tecnico_lo_copio(client: TestClient) -> None:
+    guardado = _plan_de_ordenes(client)
+    _cargar(client, _ordenes([{
+        "ID Contrato": "A-3", "Cierre": "NO REALIZADO",
+        "Estado No Realizado": "FIN DE TURNO", "Obs. Cierre": "Fin de turno ",
+    }]))
+
+    assert _tareas(client)[("A-3", guardado["id"])]["observation"] == "Fin de turno"
+
+
+def test_cargar_las_ordenes_dos_veces_deja_el_registro_igual(client: TestClient) -> None:
+    _plan_de_ordenes(client)
+    contenido = _ordenes([
+        {"ID Contrato": "A-1", "Cierre": "REALIZADO", "NODO": "SOLIDARIDAD"},
+        {"ID Contrato": "A-3", "Cierre": "NO REALIZADO", "Estado No Realizado": "FIN DE TURNO"},
+    ])
+
+    primera = _cargar(client, contenido)
+    segunda = _cargar(client, contenido)
+
+    assert primera["updated"] == 2
+    assert segunda["updated"] == 0
+    assert segunda["previously_loaded_at"] is not None
+
+
+def test_reconoce_las_columnas_de_la_planilla_de_ordenes() -> None:
+    columnas = [
+        "N° OT", "Estado", "ID Contrato", "Fecha Programación", "Fecha Creación", "Cierre",
+        "Observaciones", "Obs. Cierre", "Estado No Realizado", "NODO", "COORDENADAS",
+    ]
+
+    assert follow_up_mapping(columnas) == {
+        "id": "ID Contrato",
+        "done": "Cierre",
+        "observation": "Obs. Cierre",
+        "reason": "Estado No Realizado",
+        "migrated_node": "NODO",
+        "date": "Fecha Programación",
+    }
