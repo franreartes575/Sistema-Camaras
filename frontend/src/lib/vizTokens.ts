@@ -85,9 +85,41 @@ export const STATUS_INK = {
 /** Lo pendiente en el mapa va hueco: aro oscuro sobre blanco, lejos del verde y el rojo. */
 export const PENDING_RING = "#334155";
 
-/** Línea de los recorridos del registro; la jornada enfocada pasa a SERIES_SELECTED. */
+/** Línea de un recorrido del registro sin color de día asignado. */
 export const ROUTE_LINE = SERIES_BASE;
-export const ROUTE_LINE_FOCUS = SERIES_SELECTED;
+
+/**
+ * Colores de los días del Registro: uno por fecha, para reconocerla de un
+ * vistazo en el mapa y en la grilla de días. Son diez porque un plan suele
+ * tener hasta diez jornadas; con más, se repiten. Más de cinco tonos sobre el
+ * fondo de OSM se parecen entre sí (azul/índigo, naranja/dorado): por eso el
+ * mapa suma una leyenda con el color de cada día y el rótulo "fecha · Día N"
+ * sobre cada línea.
+ */
+export const REGISTRY_DAY_PALETTE = [
+  "#1f6fd1", // azul
+  "#d96300", // naranja
+  "#7a3db8", // violeta
+  "#d6336c", // rosa
+  "#0a9396", // verde azulado
+  "#8a5a2b", // marrón
+  "#a67c00", // dorado
+  "#3a7d1e", // verde oscuro
+  "#4f46e5", // índigo
+  "#b91c1c", // carmesí
+] as const;
+
+/**
+ * Color de cada fecha: se reparte por orden cronológico entre todas las
+ * fechas a la vista (no sólo las marcadas), así un día no cambia de color al
+ * marcar o sacar otros.
+ */
+export function assignDayColors(dates: string[]): Record<string, string> {
+  const unique = [...new Set(dates)].sort();
+  return Object.fromEntries(
+    unique.map((date, index) => [date, REGISTRY_DAY_PALETTE[index % REGISTRY_DAY_PALETTE.length]]),
+  );
+}
 
 /**
  * Color de cada cluster en el mapa del Inicio. Es la excepción a la regla de

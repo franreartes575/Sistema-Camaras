@@ -24,6 +24,7 @@ import FiltersBar from "@/components/registro/FiltersBar";
 import { Notice } from "@/components/ui/controls";
 import { IconDatabase } from "@/components/ui/icons";
 import { downloadBlob } from "@/lib/download";
+import { assignDayColors } from "@/lib/vizTokens";
 import { todayIso } from "@/lib/planDates";
 import {
   deletePlan,
@@ -160,6 +161,8 @@ export default function RegistroView({ refreshKey, mobileView, onShowMap, onPlan
   // useJson conserva lo último que leyó: sin plan elegido no se muestra nada de eso.
   const routes = useMemo(() => (hasChoice ? sortRoutes(routesQuery.data ?? []) : []), [hasChoice, routesQuery.data]);
   const tasks = useMemo(() => (hasChoice ? sortTasks(tasksQuery.data ?? []) : []), [hasChoice, tasksQuery.data]);
+  // Un color por fecha entre todas las de la vista, no sólo las marcadas.
+  const dayColors = useMemo(() => assignDayColors(routes.map((route) => route.date)), [routes]);
 
   const stateCounts = useMemo(() => {
     const counts = Object.fromEntries(STATE_FILTERS.map(({ id }) => [id, 0])) as Record<StateFilter, number>;
@@ -477,6 +480,7 @@ export default function RegistroView({ refreshKey, mobileView, onShowMap, onPlan
               <div className="space-y-3">
               <DayPicker
                 routes={routes}
+                dayColors={dayColors}
                 selected={selectedSet}
                 today={today}
                 onSetMany={setMany}
@@ -550,6 +554,7 @@ export default function RegistroView({ refreshKey, mobileView, onShowMap, onPlan
         <div className="relative min-h-0 flex-1">
           <RegistroMap
             routes={mapRoutes}
+            dayColors={dayColors}
             focusedRouteId={focusedId}
             selectedCount={selected.length}
             onFocusRoute={focusRoute}

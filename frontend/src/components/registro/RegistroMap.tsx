@@ -4,11 +4,10 @@
  * Mapa del registro: los recorridos elegidos en la lista, con cada parada
  * marcada según su estado.
  *
- * A diferencia del planificador, acá conviven jornadas de días y planes
- * distintos, así que el color de la línea no identifica el día (los cinco
- * colores de DAY_PALETTE no alcanzan y chocarían con el verde/rojo de los
- * estados). Todas las líneas van en un mismo azul con su rótulo de fecha; la
- * jornada enfocada pasa a naranja y las demás se atenúan.
+ * Cada día tiene su color (`dayColors`, ver `assignDayColors`), el mismo que
+ * lleva en la grilla de días; la leyenda del mapa dice cuál es cuál y cada
+ * línea lleva su rótulo "fecha · Día N". La jornada enfocada se engrosa y las
+ * demás se atenúan.
  */
 
 import type { LngLatBoundsLike, MapRef } from "react-map-gl/maplibre";
@@ -21,10 +20,12 @@ import { formatDayLabel } from "@/lib/format";
 import { OSM_STYLE } from "@/lib/mapStyle";
 import type { RouteDetail, TaskStatus } from "@/lib/registro";
 import { addStatusIcons, statusIconId, STATUSES } from "@/lib/statusIcons";
-import { DEPOT_INK, MARK_RING, ROUTE_LINE, ROUTE_LINE_FOCUS } from "@/lib/vizTokens";
+import { DEPOT_INK, MARK_RING, ROUTE_LINE } from "@/lib/vizTokens";
 
 type Props = {
   routes: RouteDetail[];
+  /** Color de cada fecha (AAAA-MM-DD). */
+  dayColors: Record<string, string>;
   focusedRouteId: number | null;
   /** Cuántos recorridos hay marcados, aunque sus paradas sigan cargando. */
   selectedCount: number;
@@ -48,7 +49,7 @@ const LABEL_INK = "#0b0b0b";
 // Opacidad de lo que no está enfocado cuando hay una jornada enfocada.
 const DIMMED = 0.3;
 
-export default function RegistroMap({ routes, focusedRouteId, selectedCount, onFocusRoute }: Props) {
+export default function RegistroMap({ routes, dayColors, focusedRouteId, selectedCount, onFocusRoute }: Props) {
   const mapRef = useRef<MapRef | null>(null);
   const [iconsReady, setIconsReady] = useState(false);
   const [hover, setHover] = useState<HoverInfo | null>(null);
@@ -68,11 +69,21 @@ export default function RegistroMap({ routes, focusedRouteId, selectedCount, onF
           properties: {
             route: route.id,
             focused: route.id === focusedRouteId,
+            color: dayColors[route.date] ?? ROUTE_LINE,
             label: `${formatDayLabel(route.date)} · Día ${route.day}`,
           },
         })),
     }),
-    [routes, focusedRouteId],
+    [routes, dayColors, focusedRouteId],
+  );
+
+  /** Los días que están en el mapa, de primero a último, con su color. */
+  const legendDays = useMemo(
+    () =>
+      [...new Set(routes.map((route) => route.date))]
+        .sort()
+        .map((date) => ({ date, color: dayColors[date] ?? ROUTE_LINE })),
+    [routes, dayColors],
   );
 
   const stops = useMemo(
@@ -224,14 +235,12 @@ export default function RegistroMap({ routes, focusedRouteId, selectedCount, onF
             {STATUS_LABEL[status]}
           </span>
         ))}
-        <span className="flex items-center gap-1">
-          <span className="h-1 w-4 rounded-full" style={{ backgroundColor: ROUTE_LINE }} />
-          Recorrido
-        </span>
-        <span className="flex items-center gap-1">
-          <span className="h-1 w-4 rounded-full" style={{ backgroundColor: ROUTE_LINE_FOCUS }} />
-          Enfocado
-        </span>
+        {legendDays.map(({ date, color }) => (
+          <span key={date} className="flex items-center gap-1">
+            <span className="h-1.5 w-4 rounded-full" style={{ backgroundColor: color }} />
+            {formatDayLabel(date)}
+          </span>
+        ))}
       </div>
 
       {selectedCount === 0 && (
@@ -267,7 +276,7 @@ export default function RegistroMap({ routes, focusedRouteId, selectedCount, onF
           layout={{ "line-cap": "round", "line-join": "round", "line-sort-key": ["case", ["get", "focused"], 1, 0] }}
           paint={{
             // eslint-disable-next-line @typescript-eslint/no-explicit-any
-            "line-color": ["case", ["get", "focused"], ROUTE_LINE_FOCUS, ROUTE_LINE] as any,
+            "line-color": ["get", "color"] as any,
             // eslint-disable-next-line @typescript-eslint/no-explicit-any
             "line-width": ["case", ["get", "focused"], 5, 3.5] as any,
             // eslint-disable-next-line @typescript-eslint/no-explicit-any
