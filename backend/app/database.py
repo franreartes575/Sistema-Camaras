@@ -15,7 +15,9 @@ from typing import Iterator
 from . import config
 
 # Subirlo cuando cambie el esquema, junto con la migración que corresponda.
-SCHEMA_VERSION = 1
+# 2: catálogo de cámaras, sedes e importaciones del catálogo. Son tablas
+#    nuevas, así que `IF NOT EXISTS` alcanza y no hace falta migrar nada.
+SCHEMA_VERSION = 2
 
 _SCHEMA_FILE = Path(__file__).with_name("esquema.sql")
 

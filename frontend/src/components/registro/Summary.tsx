@@ -16,7 +16,7 @@ import { formatDayLabel, percent } from "@/lib/format";
 import type { RouteSummary, TaskCounts, TaskStatus } from "@/lib/registro";
 import { STATUS_INK } from "@/lib/vizTokens";
 
-const SEGMENTS: { status: TaskStatus; key: keyof TaskCounts }[] = [
+export const SEGMENTS: { status: TaskStatus; key: keyof TaskCounts }[] = [
   { status: "realizada", key: "done" },
   { status: "pendiente", key: "pending" },
   { status: "no_realizada", key: "not_done" },

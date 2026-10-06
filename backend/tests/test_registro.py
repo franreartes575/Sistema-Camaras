@@ -137,6 +137,7 @@ def test_la_base_se_crea_con_tablas_vistas_y_version() -> None:
         conn.close()
 
     assert {"planes", "recorridos", "paradas", "cargas_seguimiento"} <= objetos
+    assert {"camaras", "sedes", "cargas_catalogo"} <= objetos
     assert {"v_paradas", "v_recorridos", "v_planes"} <= objetos
     assert version == database.SCHEMA_VERSION
 

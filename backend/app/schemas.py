@@ -418,3 +418,174 @@ class FollowUpImport(BaseModel):
     done: int
     not_done: int
     unmatched: int
+
+
+# --------------------------------------------------------------------------
+# Catálogo de cámaras y sedes
+# --------------------------------------------------------------------------
+
+# Cuántas cámaras puede llevar una planilla armada desde el catálogo.
+MAX_CATALOG_SELECTION = 5000
+
+
+class CatalogCamera(BaseModel):
+    """Una cámara del catálogo, con lo que dice el registro de ella."""
+
+    id: str
+    lat: float
+    lon: float
+    locality: str = Field(..., description="Municipio, calculado por coordenadas")
+    locality_manual: bool = Field(
+        ..., description="La localidad la corrigió un administrador"
+    )
+    label: str | None
+    node: str | None
+    observation: str | None
+    created_at: str
+    updated_at: str
+    visits: int = Field(..., description="Tareas realizadas en esta cámara")
+    last_visit: dt.date | None = Field(None, description="Fecha de la última realizada")
+    last_status: ReportedStatus | None = Field(
+        None, description="Estado de su tarea más reciente (plan más nuevo)"
+    )
+    last_planned: dt.date | None = Field(
+        None, description="Fecha de su tarea más reciente"
+    )
+
+
+class CatalogCameraUpdate(BaseModel):
+    """Corrección manual de una cámara. `locality=None` vuelve al cálculo."""
+
+    locality: str | None = Field(None, min_length=1, max_length=120)
+
+
+class CatalogImportResult(BaseModel):
+    """Qué cambió en el catálogo al importar una planilla."""
+
+    import_id: int
+    filename: str
+    rows: int = Field(..., description="Filas de la planilla")
+    valid: int = Field(..., description="Filas con ID y coordenadas válidas")
+    added: int
+    updated: int
+    unchanged: int
+    duplicates: int = Field(
+        ..., description="Filas con un ID repetido en el archivo (vale la última)"
+    )
+    discarded: list[DiscardedRow]
+    camera_count: int = Field(..., description="Cámaras en el catálogo después de importar")
+    municipalities_loaded: bool = Field(
+        ..., description="Si están los límites para calcular la localidad"
+    )
+    warning: str | None = None
+    previously_loaded_at: str | None = None
+
+
+class CatalogImport(BaseModel):
+    """Una importación del historial del catálogo."""
+
+    id: int
+    filename: str
+    loaded_at: str
+    rows: int
+    added: int
+    updated: int
+    unchanged: int
+    discarded: int
+
+
+class CatalogSelection(BaseModel):
+    """IDs del catálogo con los que armar una planilla para planificar."""
+
+    ids: list[str] = Field(..., min_length=1, max_length=MAX_CATALOG_SELECTION)
+
+
+class CatalogClusterCamera(BaseModel):
+    id: str
+    cluster: int = Field(..., description="-1 = suelta (ruido)")
+
+
+class CatalogCluster(Cluster):
+    color: int = Field(
+        ..., description="Índice de color: dos clusters vecinos nunca comparten"
+    )
+
+
+class CatalogClusters(BaseModel):
+    """El catálogo entero agrupado con DBSCAN."""
+
+    eps_km: float
+    cameras: list[CatalogClusterCamera]
+    clusters: list[CatalogCluster]
+    noise_count: int
+
+
+class DepotIn(BaseModel):
+    """Una sede (base operativa) de la que salen las cuadrillas."""
+
+    name: str = Field(..., min_length=1, max_length=120)
+    lat: float = Field(..., ge=-90, le=90)
+    lon: float = Field(..., ge=-180, le=180)
+
+
+class Depot(DepotIn):
+    id: int
+    created_at: str
+
+
+class LocalitySummary(BaseModel):
+    name: str
+    cameras: int
+    visited: int = Field(..., description="Cámaras con al menos una tarea realizada")
+    pending: int = Field(
+        ..., description="Cámaras cuya tarea más reciente todavía falta"
+    )
+    last_visit: dt.date | None
+
+
+class VisitAge(BaseModel):
+    """Cámaras según cuánto hace de su última visita realizada."""
+
+    never: int
+    within_30: int
+    within_90: int
+    older: int
+
+
+class MonthTasks(BaseModel):
+    month: str = Field(..., description="AAAA-MM")
+    done: int
+    pending: int
+    not_done: int
+    rescheduled: int
+
+
+class DepotReach(BaseModel):
+    """Cámaras para las que una sede es la más cercana (en línea recta)."""
+
+    id: int
+    name: str
+    cameras: int
+    average_km: float | None
+    max_km: float | None
+
+
+class CatalogSummary(BaseModel):
+    """Todo lo que muestra el Inicio, en una sola respuesta."""
+
+    today: dt.date
+    camera_count: int
+    locality_count: int
+    municipalities_loaded: bool
+    localities: list[LocalitySummary]
+    visit_age: VisitAge
+    plan_count: int
+    route_count: int
+    distance_m: float
+    tasks: TaskCounts
+    months: list[MonthTasks]
+    depots: list[DepotReach]
+    planned_outside_catalog: int = Field(
+        ..., description="Cámaras con tareas en el registro que no están en el catálogo"
+    )
+    last_import_at: str | None

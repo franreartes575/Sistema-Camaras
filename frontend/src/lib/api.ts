@@ -119,8 +119,8 @@ export type ProcessResponse = {
   discarded: DiscardedRow[];
 };
 
-/** Una sede guardada por el usuario — sólo vive en el navegador. */
-export type Depot = { id: string; name: string; lat: number; lon: number };
+/** Una sede (base operativa) de la que salen las cuadrillas, guardada en el servidor. */
+export type Depot = { id: number; name: string; lat: number; lon: number };
 
 /** Punto de partida ya resuelto para un cluster (sede guardada o manual). */
 export type ClusterStart = { lat: number; lon: number; name: string | null };

@@ -124,7 +124,7 @@ function StartPicker({
     (depot) =>
       start && depot.lat === start.lat && depot.lon === start.lon && depot.name === start.name,
   );
-  const mode = mixed ? "mixed" : start === undefined ? "" : matchedDepot ? matchedDepot.id : "custom";
+  const mode = mixed ? "mixed" : start === undefined ? "" : matchedDepot ? String(matchedDepot.id) : "custom";
 
   return (
     <>
@@ -137,7 +137,7 @@ function StartPicker({
             onChange(fallback);
             return;
           }
-          const depot = depots.find((candidate) => candidate.id === value);
+          const depot = depots.find((candidate) => String(candidate.id) === value);
           if (depot) onChange({ lat: depot.lat, lon: depot.lon, name: depot.name });
         }}
         className={SELECT_CLASS}
@@ -200,15 +200,17 @@ function ClusterStartRow({
 
 export function StartsStep({
   depots,
+  canEditDepots,
   preview,
   clusterStarts,
-  onDepotsChange,
+  onDepotsChanged,
   onClusterStartsChange,
 }: {
   depots: Depot[];
+  canEditDepots: boolean;
   preview: ProcessResponse;
   clusterStarts: Record<number, ClusterStart>;
-  onDepotsChange: (depots: Depot[]) => void;
+  onDepotsChanged: () => void;
   onClusterStartsChange: (starts: Record<number, ClusterStart>) => void;
 }) {
   const { clusters } = preview;
@@ -261,7 +263,7 @@ export function StartsStep({
           </ul>
         </>
       )}
-      <DepotEditor depots={depots} onChange={onDepotsChange} />
+      <DepotEditor depots={depots} canEdit={canEditDepots} onChanged={onDepotsChanged} />
     </>
   );
 }

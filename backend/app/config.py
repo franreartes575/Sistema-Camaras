@@ -38,6 +38,15 @@ API_DOCS: bool = os.getenv("API_DOCS", "").lower() in ("1", "true", "yes")
 # git — los registros son datos de operación, no código.
 DB_PATH: str = os.getenv("DB_PATH", str(_DATA_DIR / "recorridos.db"))
 
+# Límites de los municipios de Salta (capa `municipio` del IGN), con los que se
+# calcula la localidad de cada cámara del catálogo sin consultar servicios
+# externos. Va con el código (no es dato de operación) y se genera una sola vez
+# con `python -m app.catalogo_cli preparar-municipios`.
+MUNICIPIOS_PATH: str = os.getenv(
+    "MUNICIPIOS_PATH",
+    str(Path(__file__).resolve().parent / "data" / "municipios_salta.geojson"),
+)
+
 # Extensiones aceptadas en la carga de planillas.
 ALLOWED_UPLOAD_EXTENSIONS: tuple[str, ...] = (".xlsx", ".xlsm", ".csv")
 
@@ -66,6 +75,8 @@ RATE_LIMIT_PROCESS_MAX: int = int(os.getenv("RATE_LIMIT_PROCESS_MAX", "20"))
 RATE_LIMIT_OPTIMIZE_MAX: int = int(os.getenv("RATE_LIMIT_OPTIMIZE_MAX", "10"))
 # El registro se consulta seguido (cada filtro es una lectura): tope holgado.
 RATE_LIMIT_REGISTRO_MAX: int = int(os.getenv("RATE_LIMIT_REGISTRO_MAX", "240"))
+# El catálogo también: el Inicio y el selector de cámaras lo leen al abrirse.
+RATE_LIMIT_CATALOGO_MAX: int = int(os.getenv("RATE_LIMIT_CATALOGO_MAX", "240"))
 
 # Proxies cuyo `X-Forwarded-For` se cree (CIDR separados por coma). La IP real
 # del cliente es la primera, contando desde la derecha, que NO es uno de estos.

@@ -1,16 +1,37 @@
 "use client";
 
 import type { RegistroSync } from "@/components/ControlPanel";
+import CatalogPicker from "@/components/panel/CatalogPicker";
 import { followUpSummary } from "@/components/registro/ImportPanel";
-import type { ColumnMapping, CoordOrder, UploadExcelResponse } from "@/lib/api";
+import type { ColumnMapping, CoordOrder, Depot, UploadExcelResponse } from "@/lib/api";
+import type { CatalogCamera } from "@/lib/catalogo";
 import { BUTTON, ColumnField, Notice, Select } from "@/components/ui/controls";
 import { IconDatabase, IconUpload } from "@/components/ui/icons";
+
+/** De dónde salen las cámaras del plan: elegidas del catálogo o de una planilla. */
+export type InputMode = "catalogo" | "planilla";
+
+/** Lo que necesita el modo catálogo; lo arma la página. */
+export type CatalogInput = {
+  cameras: CatalogCamera[] | null;
+  error: string | null;
+  depots: Depot[];
+  selection: string[];
+  /** La planilla actual salió del catálogo (y con cuántas cámaras). */
+  plannedCount: number | null;
+  onSelectionChange: (ids: string[]) => void;
+  onPlan: () => void;
+  onRetry: () => void;
+};
 
 type Props = {
   upload: UploadExcelResponse | null;
   mapping: ColumnMapping;
   isLoading: boolean;
   registroSync: RegistroSync | null;
+  inputMode: InputMode;
+  catalog: CatalogInput;
+  onInputModeChange: (mode: InputMode) => void;
   onFile: (file: File) => void;
   onMappingChange: (mapping: ColumnMapping) => void;
   onOpenRegistry: () => void;
@@ -42,8 +63,64 @@ function RegistroSyncNotice({ sync, onOpenRegistry }: { sync: RegistroSync; onOp
   );
 }
 
-/** Paso 1: subir la planilla (o el Excel de seguimiento) y mapear columnas. */
-export default function FileStep({
+/**
+ * Paso 1: de dónde salen las cámaras. Del catálogo (elegidas una por una, por
+ * localidad, por cercanía o pegando IDs) o de una planilla subida —también el
+ * Excel de seguimiento completado— con su mapeo de columnas.
+ */
+export default function FileStep(props: Props) {
+  const { inputMode, onInputModeChange, catalog } = props;
+  return (
+    <>
+      <div role="tablist" aria-label="Origen de las cámaras" className="grid grid-cols-2 gap-1 rounded-lg bg-slate-900 p-1">
+        {(
+          [
+            ["catalogo", "Del catálogo"],
+            ["planilla", "Subir planilla"],
+          ] as const
+        ).map(([value, text]) => (
+          <button
+            key={value}
+            type="button"
+            role="tab"
+            aria-selected={inputMode === value}
+            onClick={() => onInputModeChange(value)}
+            className={`rounded-md px-2 py-1.5 text-xs font-semibold transition ${
+              inputMode === value ? "bg-slate-700 text-white shadow-sm" : "text-slate-400 hover:text-slate-200"
+            }`}
+          >
+            {text}
+          </button>
+        ))}
+      </div>
+      {inputMode === "catalogo" ? (
+        <>
+          {catalog.plannedCount !== null && props.upload && (
+            <Notice tone="info">
+              Planilla armada con <b>{catalog.plannedCount}</b> cámara(s) del catálogo. Seguí en el
+              paso 2, o cambiá la selección y volvé a planificar.
+            </Notice>
+          )}
+          <CatalogPicker
+            cameras={catalog.cameras}
+            error={catalog.error}
+            depots={catalog.depots}
+            selection={catalog.selection}
+            isLoading={props.isLoading}
+            onSelectionChange={catalog.onSelectionChange}
+            onPlan={catalog.onPlan}
+            onRetry={catalog.onRetry}
+          />
+        </>
+      ) : (
+        <UploadStep {...props} upload={catalog.plannedCount !== null ? null : props.upload} />
+      )}
+    </>
+  );
+}
+
+/** Subir la planilla (o el Excel de seguimiento) y mapear columnas. */
+function UploadStep({
   upload,
   mapping,
   isLoading,

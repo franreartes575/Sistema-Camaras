@@ -20,9 +20,12 @@ servicios pagos: ninguna coordenada de las cámaras sale del equipo.
 
 ## Cómo funciona
 
-1. Cargás la planilla de cámaras (`.xlsx`, `.xlsm` o `.csv`).
-2. El backend lee sólo los encabezados y sugiere qué columna es cada cosa.
-3. Confirmás el mapeo y ajustás el radio de agrupamiento.
+1. Elegís las cámaras **del catálogo** (por localidad, por cercanía a una
+   sede, buscando o pegando IDs) o subís una planilla (`.xlsx`, `.xlsm` o
+   `.csv`).
+2. Con una planilla, el backend lee sólo los encabezados y sugiere qué columna
+   es cada cosa; desde el catálogo el mapeo sale solo.
+3. Ajustás el radio de agrupamiento.
 4. DBSCAN agrupa las cámaras por cercanía geográfica real.
 5. OR-Tools resuelve el orden de visita óptimo dentro de cada grupo.
 6. El mapa dibuja cada recorrido y numera las paradas.
@@ -31,6 +34,60 @@ servicios pagos: ninguna coordenada de las cámaras sale del equipo.
    Excel (en el paso 1 o en el Registro) se actualiza el avance de cada tarea.
 9. Desde el Registro, "Planificar los próximos recorridos" lleva lo que falta
    de vuelta al paso 1.
+
+## Inicio y catálogo de cámaras
+
+**Inicio** es lo primero que se ve al entrar: el resumen del catálogo de
+cámaras, de los planes y del avance de las tareas.
+
+- **Cifras**: cámaras y localidades, planes y km, avance de tareas, lo que
+  falta y cuántas cámaras no se visitan hace más de 90 días.
+- **Cámaras por localidad**: tabla ordenable con cuántas hay, qué parte se
+  visitó, cuántas tienen una tarea pendiente y la última visita. Tocar una
+  localidad la muestra sola en el mapa; el ícono de calendario la lleva a
+  Planificar con sus cámaras ya elegidas.
+- **Gráficos**: tareas por mes y por estado, antigüedad de la última visita y
+  cámaras por sede más cercana. Abajo, los últimos planes.
+- **Mapa**: todo el catálogo con un color por cluster (el mismo DBSCAN del
+  planificador, con radio ajustable) y las sedes marcadas. Con más clusters
+  que colores, los vecinos nunca comparten color y cada uno lleva su rótulo
+  "C n".
+
+**El catálogo** guarda todas las cámaras, se planifiquen o no, en la base del
+registro. Lo cargan los administradores desde Inicio → *Administrar catálogo y
+sedes*, importando una planilla con el mismo mapeo del planificador. Importar
+**combina por ID**: agrega las nuevas, actualiza las que cambiaron y nunca
+borra (una celda vacía tampoco pisa lo que había). Las bajas y las
+correcciones se hacen a mano, cámara por cámara.
+
+**La localidad se calcula por coordenadas**: es el municipio de Salta en que
+cae cada cámara, según los límites oficiales del IGN guardados en
+`backend/app/data/municipios_salta.geojson`. No se consulta ningún servicio
+externo. Ese archivo se genera **una sola vez** en el servidor:
+
+```powershell
+cd backend
+.\venv\Scripts\python.exe -m app.catalogo_cli preparar-municipios
+```
+
+Baja la capa `municipio` del WFS del IGN filtrada a Salta, la simplifica (unos
+cientos de KB), la guarda y recalcula la localidad de todo el catálogo. Si el
+servidor no tiene salida a internet, se baja el GeoJSON en otra máquina y se
+pasa con `--archivo municipios.geojson`. Conviene versionar el archivo
+generado. Mientras no exista, la localidad figura como "Sin calcular". Un
+administrador puede corregir a mano la de una cámara, y esa corrección no la
+pisa ninguna importación.
+
+**Las sedes** (bases operativas de las cuadrillas) también viven en el
+servidor, las mismas para todos. Las cargan los administradores; las que
+estaban guardadas en el navegador se pasan solas la primera vez que entra un
+administrador desde ese navegador.
+
+**Planificar desde el catálogo** arma una planilla con las cámaras elegidas
+(`POST /catalogo/planilla`) que entra por el paso 1 como cualquier otra: el
+planificador sigue sin estado y el resto del flujo no cambia. Los IDs se
+pegan como vengan (una columna de Excel, separados por comas, tabs o
+espacios) y se copian uno por línea, listos para pegar en Excel.
 
 ## Registro de recorridos
 
@@ -78,6 +135,10 @@ sistema-logistico-free/
 │   │   ├── config.py             # OSRM, CORS, límites de subida, DB_PATH
 │   │   ├── main.py               # Endpoints del planificador
 │   │   ├── registro_route.py     # Endpoints del registro (/registro/...)
+│   │   ├── catalogo_route.py     # Catálogo, sedes y resumen del Inicio (/catalogo/...)
+│   │   ├── catalogo_cli.py       # preparar-municipios, recalcular-localidades
+│   │   ├── ingesta.py            # Planilla → puntos válidos (planificador y catálogo)
+│   │   ├── data/                 # Límites de los municipios de Salta (GeoJSON)
 │   │   ├── red.py                # IP real del cliente detrás de proxies
 │   │   ├── auth/                 # Login, sesiones, auditoría y CLI
 │   │   ├── database.py           # Conexión SQLite y aplicación del esquema
@@ -89,17 +150,21 @@ sistema-logistico-free/
 │   │       ├── routing.py        # Proveedores de distancia (OSRM / línea recta)
 │   │       ├── optimizer.py      # TSP por cluster con OR-Tools
 │   │       ├── export.py         # Excel de seguimiento y de tareas
-│   │       └── registro.py       # Planes, avance y carga de seguimientos
+│   │       ├── registro.py       # Planes, avance y carga de seguimientos
+│   │       ├── catalogo.py       # Catálogo, sedes, clusters y resumen
+│   │       └── localidades.py    # Municipio de cada punto (punto en polígono)
 │   ├── data/                     # recorridos.db, seguridad.db y la clave maestra (ignorada por git)
-│   └── tests/                    # 367 tests, 98% de cobertura
+│   └── tests/
 ├── frontend/src/
 │   ├── app/page.tsx              # Orquesta el planificador y la navegación
 │   ├── components/
 │   │   ├── MapView.tsx           # MapLibre: puntos, rótulos y polilíneas
 │   │   ├── ControlPanel.tsx      # Los cinco pasos del planificador
 │   │   ├── auth/                 # Puerta de acceso, login, inactividad
+│   │   ├── inicio/               # Sección Inicio: cifras, gráficos, mapa, administración
+│   │   ├── panel/                # Pasos del planificador (CatalogPicker: elegir del catálogo)
 │   │   └── registro/             # Sección Registro: panel, resumen, mapa
-│   └── lib/{api,registro,mapStyle,vizTokens,statusIcons}.ts
+│   └── lib/{api,catalogo,registro,mapStyle,vizTokens,statusIcons}.ts
 ├── deploy/                       # Proxy HTTPS: Caddyfile y nginx.conf
 └── osrm/                         # Motor de ruteo — ver osrm/README.md
     ├── docker-compose.yml
@@ -271,6 +336,19 @@ Todas exigen sesión. Desde el navegador se llaman como `/api/...`.
 | `GET /auth/sesiones` · `DELETE /auth/sesiones/{id}` · `POST /auth/sesiones/cerrar-otras` | Sesiones propias |
 | `POST /auth/password` | Cambia la contraseña y cierra las demás sesiones |
 | `GET /auth/auditoria` | Eventos de acceso (sólo administradores) |
+
+### Catálogo
+
+| Endpoint | Qué hace |
+|---|---|
+| `GET /catalogo/camaras/` | Todo el catálogo, con localidad, última visita y estado de cada cámara |
+| `POST /catalogo/importar/` | Combina una planilla con el catálogo, por ID (administradores) |
+| `PATCH/DELETE /catalogo/camaras/{id}` | Corrige la localidad a mano / da de baja (administradores) |
+| `GET /catalogo/importaciones/` | Historial de planillas importadas |
+| `POST /catalogo/planilla` | Planilla de entrada al planificador con los IDs elegidos |
+| `GET /catalogo/clusters` | El catálogo agrupado con DBSCAN, con un color por cluster |
+| `GET/POST/PUT/DELETE /catalogo/sedes/` | Sedes (escribir: administradores) |
+| `GET /catalogo/resumen` | Todo lo que muestra el Inicio |
 
 ### Registro
 

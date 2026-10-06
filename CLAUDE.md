@@ -13,6 +13,7 @@ español. Mantené ese idioma.
 cd backend
 .\venv\Scripts\python.exe -m app.auth.cli inicializar        # una vez: clave maestra + base de seguridad
 .\venv\Scripts\python.exe -m app.auth.cli crear-usuario --usuario admin --nombre "Admin" --rol admin
+.\venv\Scripts\python.exe -m app.catalogo_cli preparar-municipios  # una vez: límites del IGN para la localidad
 .\venv\Scripts\python.exe -m uvicorn app.main:app --reload --no-proxy-headers --port 8000
 
 .\venv\Scripts\python.exe -m pytest                              # suite completa + cobertura
@@ -39,9 +40,16 @@ corrélo siempre después de tocar `.tsx`.
 
 Todo pasa por `components/auth/AuthGate.tsx`: sin sesión no se monta nada de
 la aplicación, y al perderla (logout, inactividad, revocación) se desmonta
-entera. Dentro, dos secciones, Planificar y Registro, que se eligen en el
-encabezado (`app/page.tsx`); las dos quedan montadas y se ocultan con CSS, así
-que ir y volver no pierde el estado de ninguna.
+entera. Dentro, tres secciones, Inicio (la que abre), Planificar y Registro,
+que se eligen en el encabezado (`app/page.tsx`); quedan montadas y se ocultan
+con CSS, así que ir y volver no pierde el estado de ninguna. El catálogo y las
+sedes se leen una vez en `page.tsx` y los comparten Inicio y el paso 1;
+`catalogVersion` / `registroVersion` fuerzan a releer después de un cambio.
+
+Las lecturas de datos usan `lib/useJson.ts`, que reintenta una vez un GET
+que falla por algo pasajero (status 0 o 5xx): el rewrite `/api` de Next
+devuelve un 500 sin llegar al backend si se le cae la conexión, y el Inicio
+dispara varias lecturas juntas al entrar.
 
 Toda llamada al backend pasa por `lib/http.ts` (`apiFetch`): va a `/api/...`
 en el mismo origen, agrega `X-CSRF-Token` en los métodos que modifican y avisa
@@ -144,8 +152,10 @@ routers se incluyen con `dependencies=[Depends(requiere_sesion)]`.
 - **Clave maestra**: derivadas por propósito con HKDF (`cripto.subclave`). Sin
   ella el backend no arranca (lifespan).
 
-`_ingest_and_cluster()` en `main.py` es el tramo compartido por `/process/` y
-`/optimize/`; toda lógica nueva de ingesta va ahí, no duplicada.
+`ingest_points()` en `app/ingesta.py` es el tramo compartido "archivo →
+puntos válidos" de `/process/`, `/optimize/` (vía `_ingest_and_cluster()` en
+`main.py`, que además agrupa) y `/catalogo/importar/`; toda lógica nueva de
+ingesta va ahí, no duplicada.
 
 ### Registro de recorridos
 
@@ -252,6 +262,35 @@ Si OSRM no puede unir dos paradas por calle, `distance_from_previous_m` es
 haría parecer que las paradas son contiguas cuando el recorrido no es
 transitable.
 
+### Catálogo de cámaras y sedes (`catalogo_route.py`, prefijo `/catalogo/`)
+
+- Tablas `camaras`, `sedes` y `cargas_catalogo` en la **misma base del
+  registro** (esquema v2): el catálogo se cruza con `paradas` por el texto del
+  ID, sin clave foránea, y el respaldo se lo lleva. Leer es para cualquier
+  sesión; escribir, `requiere_admin`. El limitador del catálogo está en
+  `_LIMITADORES`.
+- Importar **combina por ID y nunca borra**; una celda vacía no pisa lo que
+  había. Cada importación recalcula la localidad de todo el catálogo.
+- **La localidad es el municipio, calculado por coordenadas** con los límites
+  del IGN en `app/data/municipios_salta.geojson` (`config.MUNICIPIOS_PATH`),
+  que genera `python -m app.catalogo_cli preparar-municipios`. Punto en
+  polígono vectorizado con numpy (`services/localidades.py`): en Python puro
+  miles de cámaras tardan segundos. Sin el archivo la localidad es "Sin
+  calcular" — nunca se inventa. Fuera de todo municipio pero a menos de 5 km,
+  el más cercano (la simplificación deja huecos en los bordes); si no, "Fuera
+  de Salta". `localidad_manual = 1` (corrección de un admin) no la pisa
+  ninguna importación. Los tests usan polígonos inventados
+  (`tests/municipios_de_prueba.py`) y `conftest.py` apunta
+  `MUNICIPIOS_PATH` a un archivo temporal que no existe.
+- **Planificar desde el catálogo no toca el planificador**: `POST
+  /catalogo/planilla` devuelve un .xlsx con las cámaras elegidas y encabezados
+  que `suggest_mapping` reconoce solos, y el frontend lo pasa a `handleFile`
+  como si se hubiera subido. Es .xlsx y no CSV porque `read_csv` convierte
+  "00123" en 123 y el ID deja de coincidir con el catálogo y el registro.
+- Las sedes viven en el servidor (antes, en `localStorage`). La primera vez
+  que entra un admin con el servidor sin sedes, `page.tsx` sube las del
+  navegador y borra la clave (`migrateLegacyDepots`).
+
 ### El color del mapa identifica días, no clusters
 
 La cantidad de clusters no está acotada, así que el color nunca identifica un
@@ -262,6 +301,13 @@ sexto rompe el piso de distinguibilidad. Con más de cinco días el color se
 repite, por eso la identidad la sigue llevando el rótulo ("Día N" en la línea,
 "día·orden" en cada parada), y al elegir un día se dibuja solo (las demás
 capas se filtran, no se atenúan).
+
+**La excepción es el mapa del Inicio** (`components/inicio/CatalogMap.tsx`),
+donde se pide distinguir clusters: usa los mismos cinco colores
+(`CLUSTER_PALETTE`) y el backend asigna el índice (`assign_colors`) para que
+los clusters cercanos no lo compartan; la identidad la lleva el rótulo "C n".
+Las sedes van debajo de las cámaras (están en medio de un cluster y lo
+taparían) y sus nombres arriba de todo.
 
 Ojo con las expresiones de MapLibre, que rechazan la capa entera en silencio
 para el usuario (sólo queda un error en consola):
