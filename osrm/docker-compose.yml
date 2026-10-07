@@ -5,7 +5,10 @@
 
 services:
   osrm:
-    image: ghcr.io/project-osrm/osrm-backend:latest
+    # Versión fija (tag + digest): el grafo de ./data lo arma `preparar.ps1`
+    # con esta misma imagen, y otra versión de OSRM puede no leerlo. Para
+    # subirla, cambiala acá y en preparar.ps1 y volvé a correr el preparado.
+    image: ghcr.io/project-osrm/osrm-backend:v26.9.0@sha256:8a1b1bc938412f15f9b5b32d794c4ec6bf4a85dfbbabfa0a014b70b187edb53b
     container_name: osrm-salta
     # MLD es el algoritmo recomendado por OSRM: preprocesado mas rapido que CH
     # y permite recustomizar el grafo sin reextraerlo.
