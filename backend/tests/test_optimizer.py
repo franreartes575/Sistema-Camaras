@@ -2,12 +2,14 @@
 
 import io
 import json
+import threading
 
 import numpy as np
 import pandas as pd
 import pytest
 from fastapi.testclient import TestClient
 
+from app import config, main
 from app.config import MAX_UPLOAD_BYTES
 from app.main import app
 from app.services.optimizer import build_route, solve_order
@@ -596,6 +598,42 @@ def test_rechaza_subida_sobre_el_limite(client: TestClient) -> None:
 
     assert response.status_code == 413
     assert "MB" in response.json()["detail"]
+
+
+@pytest.mark.parametrize("endpoint", ["/upload-excel/", "/process/"])
+def test_rechaza_un_excel_que_descomprimido_es_demasiado_grande(
+    client: TestClient, planilla: bytes, monkeypatch, endpoint: str
+) -> None:
+    """Un .xlsx es un zip: unos pocos MB pueden descomprimirse en gigas y
+    dejar al servidor sin memoria. Se mide antes de abrirlo con openpyxl."""
+    monkeypatch.setattr(config, "MAX_XLSX_UNCOMPRESSED_BYTES", 1_000)
+
+    response = client.post(
+        endpoint,
+        files={"file": ("planilla.xlsx", planilla, XLSX_MIME)},
+        data={"col_id": "id_camara", "col_lat": "latitud", "col_lon": "longitud"},
+    )
+
+    assert response.status_code == 413
+    assert "descomprimida" in response.json()["detail"]
+
+
+def test_las_zonas_se_resuelven_en_paralelo(client: TestClient, planilla: bytes, monkeypatch) -> None:
+    """Cada zona consume su límite de tiempo de OR-Tools: de a una, seis sedes
+    son seis límites seguidos. Si no corrieran a la vez, la barrera vencería."""
+    barrera = threading.Barrier(2, timeout=10)
+    original = main._route_for_cluster
+
+    def esperando_a_la_otra(*args, **kwargs):
+        barrera.wait()
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(main, "_route_for_cluster", esperando_a_la_otra)
+
+    response = optimizar(client, planilla)
+
+    assert response.status_code == 200, response.text
+    assert sorted({ruta["cluster_id"] for ruta in response.json()["routes"]}) == [0, 1]
 
 
 def test_optimize_respeta_tope_de_camaras_por_dia(

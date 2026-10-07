@@ -12,7 +12,8 @@ from typing import Annotated, Literal
 import anyio
 from fastapi import APIRouter, Depends, File, HTTPException, Query, Response, UploadFile
 
-from .auth.dependencias import requiere_admin
+from .auth.dependencias import requiere_admin, requiere_sesion
+from .auth.servicio import SesionActiva
 from .config import RATE_LIMIT_REGISTRO_MAX
 from .database import get_db
 from .schemas import (
@@ -26,7 +27,7 @@ from .schemas import (
     Task,
     TaskUpdate,
 )
-from .security import rate_limiter, require_api_key
+from .security import rate_limiter
 from .services import registro
 from .services.export import build_tasks_workbook, tasks_filename
 from .uploads import read_upload
@@ -40,10 +41,18 @@ registro_rate_limit = rate_limiter(RATE_LIMIT_REGISTRO_MAX)
 router = APIRouter(
     prefix="/registro",
     tags=["registro"],
-    dependencies=[Depends(registro_rate_limit), Depends(require_api_key)],
+    dependencies=[Depends(registro_rate_limit)],
 )
 
 Db = Annotated[sqlite3.Connection, Depends(get_db)]
+
+
+def _author(sesion: Annotated[SesionActiva, Depends(requiere_sesion)]) -> registro.Author:
+    """Quién hace el cambio, tomado de la sesión (nunca de lo que manda el cliente)."""
+    return registro.Author(username=sesion.usuario, name=sesion.nombre)
+
+
+Author = Annotated[registro.Author, Depends(_author)]
 
 # Filtro de estado de las tareas: "faltan" = pendientes + no realizadas, que
 # es lo que hay que volver a planificar.
@@ -88,19 +97,19 @@ def list_plans(conn: Db) -> list[PlanSummary]:
 
 
 @router.post("/planes/", response_model=PlanSummary, status_code=201)
-def create_plan(plan: RegistryPlanIn, conn: Db) -> PlanSummary:
+def create_plan(plan: RegistryPlanIn, conn: Db, author: Author) -> PlanSummary:
     """Guarda un plan del planificador: sus jornadas, paradas y polilíneas."""
     try:
-        return registro.create_plan(conn, plan)
+        return registro.create_plan(conn, plan, author)
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
 
 
 @router.put("/planes/{plan_id}", response_model=PlanSummary)
-def replace_plan(plan_id: int, plan: RegistryPlanIn, conn: Db) -> PlanSummary:
+def replace_plan(plan_id: int, plan: RegistryPlanIn, conn: Db, author: Author) -> PlanSummary:
     """Reemplaza las jornadas de un plan sin seguimiento (p. ej. cambió una fecha)."""
     try:
-        return registro.replace_plan(conn, plan_id, plan)
+        return registro.replace_plan(conn, plan_id, plan, author)
     except registro.NotFoundError as exc:
         raise _not_found(exc) from exc
     except registro.ConflictError as exc:
@@ -110,19 +119,19 @@ def replace_plan(plan_id: int, plan: RegistryPlanIn, conn: Db) -> PlanSummary:
 
 
 @router.patch("/planes/{plan_id}", response_model=PlanSummary)
-def update_plan(plan_id: int, changes: PlanUpdate, conn: Db) -> PlanSummary:
+def update_plan(plan_id: int, changes: PlanUpdate, conn: Db, author: Author) -> PlanSummary:
     """Renombra un plan o edita sus notas."""
     try:
-        return registro.update_plan(conn, plan_id, changes)
+        return registro.update_plan(conn, plan_id, changes, author)
     except registro.NotFoundError as exc:
         raise _not_found(exc) from exc
 
 
 @router.delete("/planes/{plan_id}", status_code=204)
-def delete_plan(plan_id: int, conn: Db) -> Response:
+def delete_plan(plan_id: int, conn: Db, author: Author) -> Response:
     """Borra un plan con sus jornadas y tareas. No se puede deshacer."""
     try:
-        registro.delete_plan(conn, plan_id)
+        registro.delete_plan(conn, plan_id, author)
     except registro.NotFoundError as exc:
         raise _not_found(exc) from exc
     return Response(status_code=204)
@@ -183,10 +192,17 @@ def tasks_workbook(
 
 
 @router.patch("/tareas/{task_id}", response_model=Task)
-def update_task(task_id: int, changes: TaskUpdate, conn: Db) -> Task:
-    """Corrige a mano el estado, la observación o el nodo migrado de una tarea."""
+def update_task(
+    task_id: int,
+    changes: TaskUpdate,
+    conn: Db,
+    sesion: Annotated[SesionActiva, Depends(requiere_admin)],
+) -> Task:
+    """Corrige a mano el estado, la observación o el nodo migrado de una tarea
+    (sólo administradores). Queda registrado quién lo hizo."""
+    author = _author(sesion)
     try:
-        return registro.update_task(conn, task_id, changes)
+        return registro.update_task(conn, task_id, changes, author)
     except registro.NotFoundError as exc:
         raise _not_found(exc) from exc
 
@@ -195,12 +211,12 @@ def update_task(task_id: int, changes: TaskUpdate, conn: Db) -> Task:
 
 
 @router.post("/seguimiento/", response_model=FollowUpResult)
-async def import_follow_up(conn: Db, file: UploadFile = File(...)) -> FollowUpResult:
+async def import_follow_up(conn: Db, author: Author, file: UploadFile = File(...)) -> FollowUpResult:
     """Carga un Excel de seguimiento completado y actualiza las tareas del registro."""
     filename, raw = await read_upload(file)
     try:
         # pandas y SQLite bloquean: a un hilo, como /optimize/.
-        return await anyio.to_thread.run_sync(registro.import_follow_up, conn, filename, raw)
+        return await anyio.to_thread.run_sync(registro.import_follow_up, conn, filename, raw, author)
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
 

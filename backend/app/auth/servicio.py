@@ -146,6 +146,10 @@ def _bloqueada(fila: sqlite3.Row, momento: dt.datetime) -> str | None:
     return None
 
 
+# Bloqueos que vienen de contraseñas falladas: no se aplican desde una IP conocida.
+_BLOQUEOS_POR_FALLOS = ("bloqueo_permanente", "cuenta_bloqueada")
+
+
 def _revocar(conn: sqlite3.Connection, sesion_id: str, motivo: str, momento: dt.datetime) -> None:
     conn.execute(
         "UPDATE sesiones SET revocada_en = ?, motivo_revocacion = ? WHERE id = ? AND revocada_en IS NULL",
@@ -362,13 +366,18 @@ def iniciar_login(
     if fallos_ip >= config.LOGIN_MAX_FAILURES_PER_IP:
         auditoria.registrar(conn, "login_limitado", "fallo", ctx, usuario_intentado=usuario, motivo="limite_por_ip")
         raise DemasiadosIntentos()
-    if auditoria.contar_fallos(conn, ventana, usuario=usuario) >= config.LOGIN_MAX_FAILURES_PER_USER:
+    fila = conn.execute("SELECT * FROM usuarios WHERE usuario = ?", (usuario,)).fetchone()
+    # Desde donde el usuario ya entró, ni el límite por usuario ni el bloqueo:
+    # los provoca cualquiera que sepa el nombre, y dejarían afuera al dueño.
+    conocida = fila is not None and auditoria.ip_conocida(
+        conn, fila["id"], ctx.ip, momento - dt.timedelta(days=config.LOCKOUT_KNOWN_IP_DAYS)
+    )
+    if not conocida and auditoria.contar_fallos(conn, ventana, usuario=usuario) >= config.LOGIN_MAX_FAILURES_PER_USER:
         auditoria.registrar(
             conn, "login_limitado", "fallo", ctx, usuario_intentado=usuario, motivo="limite_por_usuario"
         )
         raise DemasiadosIntentos()
 
-    fila = conn.execute("SELECT * FROM usuarios WHERE usuario = ?", (usuario,)).fetchone()
     # Se verifica SIEMPRE, también contra un hash señuelo si el usuario no
     # existe: el tiempo de respuesta no delata qué cuentas hay.
     correcta = contrasenas.verificar(fila["password_hash"] if fila else contrasenas.hash_senuelo(), password)
@@ -380,6 +389,8 @@ def iniciar_login(
             auditoria.registrar(conn, "login_fallido", "fallo", ctx, usuario_intentado=usuario, motivo="usuario_inexistente")
             return CredencialesInvalidas()
         motivo = _bloqueada(actual, momento)
+        if motivo in _BLOQUEOS_POR_FALLOS and conocida:
+            motivo = None
         if motivo:
             auditoria.registrar(
                 conn, "login_fallido", "fallo", ctx, usuario_intentado=usuario, usuario_id=actual["id"], motivo=motivo
@@ -510,11 +521,13 @@ def validar_sesion(
     csrf: str | None,
 ) -> SesionActiva:
     """Valida la cookie en cada pedido: vencimientos, navegador, CSRF y rotación."""
+    # Sin cookie no hay nada que buscar: se corta antes de abrir la
+    # transacción, que toma el lock de escritura de la base de seguridad.
+    if not token:
+        raise SesionInvalida()
     momento = reloj.ahora()
 
     def _paso() -> SesionActiva | ErrorAuth:
-        if not token:
-            return SesionInvalida()
         encontrada = _buscar_sesion(conn, token, ctx, momento)
         if isinstance(encontrada, ErrorAuth):
             return encontrada
@@ -539,8 +552,12 @@ def validar_sesion(
             return cerrar("vencida", "sesion_expirada")
         if momento >= inactividad:
             return cerrar("inactividad", "sesion_expirada")
-        if _bloqueada(usuario, momento):
-            return cerrar("cuenta_bloqueada", "sesion_revocada")
+        # Sólo una cuenta deshabilitada corta las sesiones abiertas. Un bloqueo
+        # por contraseñas falladas lo puede provocar cualquiera desde afuera:
+        # no echa a quien ya está adentro (el permanente las revoca al
+        # dispararse, y quien vuelve a entrar desde una IP conocida, entra).
+        if not usuario["activo"]:
+            return cerrar("cuenta_deshabilitada", "sesion_revocada")
         if config.SESSION_BIND_USER_AGENT and fila["user_agent"] != ctx.user_agent:
             return cerrar("otro_navegador", "sesion_otro_navegador", "fallo")
         if metodo_http.upper() not in SAFE_METHODS:
@@ -551,14 +568,19 @@ def validar_sesion(
                 )
                 return PedidoRechazado()
 
-        if ctx.ip != fila["ip_ultima"]:
+        ip_cambiada = ctx.ip != fila["ip_ultima"]
+        if ip_cambiada:
             auditoria.registrar(
                 conn, "sesion_ip_cambiada", "info", ctx, motivo=f"{fila['ip_ultima']} -> {ctx.ip}", **quien
             )
-        conn.execute(
-            "UPDATE sesiones SET ultima_actividad = ?, ip_ultima = ? WHERE id = ?",
-            (_iso(momento), ctx.ip, fila["id"]),
-        )
+        # Marcar la actividad en cada pedido era un commit a disco por pedido:
+        # alcanza con cada SESSION_TOUCH_S (la inactividad se mide en minutos).
+        quieta = momento - reloj.desde_iso(fila["ultima_actividad"])
+        if ip_cambiada or quieta >= dt.timedelta(seconds=config.SESSION_TOUCH_S):
+            conn.execute(
+                "UPDATE sesiones SET ultima_actividad = ?, ip_ultima = ? WHERE id = ?",
+                (_iso(momento), ctx.ip, fila["id"]),
+            )
 
         nuevo: str | None = None
         rotado = reloj.desde_iso(fila["rotado_en"])
@@ -645,7 +667,15 @@ def cambiar_password(
         if not correcta:
             # Cuenta para el bloqueo: una sesión robada no puede probar
             # contraseñas para quedarse con la cuenta.
-            _registrar_fallo(conn, usuario, ctx, momento, evento="password_cambio_fallido", motivo="password_actual_incorrecta")
+            # Y si con este fallo se bloquea, la sesión que probaba se cierra.
+            if _registrar_fallo(
+                conn, usuario, ctx, momento, evento="password_cambio_fallido", motivo="password_actual_incorrecta"
+            ):
+                _revocar(conn, sesion.sesion_id, "cuenta_bloqueada", momento)
+                auditoria.registrar(
+                    conn, "sesion_revocada", "info", ctx, usuario_intentado=sesion.usuario,
+                    usuario_id=sesion.usuario_id, sesion_id=sesion.sesion_id, motivo="cuenta_bloqueada",
+                )
             return CredencialesInvalidas()
         if problemas:
             return PasswordRechazada(" ".join(problemas))

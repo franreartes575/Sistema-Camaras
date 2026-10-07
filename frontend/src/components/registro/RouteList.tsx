@@ -14,7 +14,7 @@ import { shiftIso } from "@/lib/planDates";
 import {
   missing,
   routeState,
-  type ReportedStatus,
+  type TaskChanges,
   type RouteDetail,
   type RouteState,
   type RouteSummary,
@@ -80,7 +80,7 @@ function RouteCard({
   busyTaskId,
   onToggle,
   onFocus,
-  onTaskStatus,
+  onTaskUpdate,
 }: {
   route: RouteSummary;
   today: string;
@@ -91,7 +91,8 @@ function RouteCard({
   busyTaskId: number | null;
   onToggle: () => void;
   onFocus: () => void;
-  onTaskStatus: (task: Task, status: ReportedStatus) => void;
+  /** Sin él (no es administrador), las tareas se ven en sólo lectura. */
+  onTaskUpdate?: (task: Task, changes: TaskChanges) => Promise<boolean>;
 }) {
   return (
     <li
@@ -152,7 +153,7 @@ function RouteCard({
                   key={task.id}
                   task={task}
                   busy={busyTaskId === task.id}
-                  onStatusChange={(status) => onTaskStatus(task, status)}
+                  onUpdate={onTaskUpdate && ((changes) => onTaskUpdate(task, changes))}
                 />
               ))}
             </ol>
@@ -179,7 +180,7 @@ export default function RouteList({
   onToggle,
   onSetMany,
   onFocus,
-  onTaskStatus,
+  onTaskUpdate,
 }: {
   routes: RouteSummary[];
   today: string;
@@ -194,7 +195,8 @@ export default function RouteList({
   onToggle: (id: number) => void;
   onSetMany: (ids: number[], on: boolean) => void;
   onFocus: (id: number) => void;
-  onTaskStatus: (task: Task, status: ReportedStatus) => void;
+  /** Sin él (no es administrador), las tareas se ven en sólo lectura. */
+  onTaskUpdate?: (task: Task, changes: TaskChanges) => Promise<boolean>;
 }) {
   const groups: { date: string; routes: RouteSummary[] }[] = [];
   for (const route of routes) {
@@ -283,7 +285,7 @@ export default function RouteList({
                   busyTaskId={busyTaskId}
                   onToggle={() => onToggle(route.id)}
                   onFocus={() => onFocus(route.id)}
-                  onTaskStatus={onTaskStatus}
+                  onTaskUpdate={onTaskUpdate}
                 />
               ))}
             </ul>

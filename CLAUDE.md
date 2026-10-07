@@ -159,6 +159,17 @@ routers se incluyen con `dependencies=[Depends(requiere_sesion)]`.
   `SeguridadMiddleware` sobre la respuesta que sea (también las `Response`
   directas de las descargas). `__Host-` exige `Secure` y `Path=/`.
 - **Reloj**: todo pasa por `reloj.ahora()` (UTC); los tests lo mueven.
+- **Bloqueo por contraseñas falladas**: no se aplica (ni el límite por
+  usuario) desde una IP donde ese usuario abrió sesión en los últimos
+  `LOCKOUT_KNOWN_IP_DAYS` días, y no cierra sesiones abiertas. Si no,
+  cualquiera que sepa el nombre del único administrador lo deja afuera. El
+  límite por IP se aplica siempre; una sesión que falla el cambio de
+  contraseña hasta bloquear la cuenta se revoca ahí mismo.
+- **`ultima_actividad`** se escribe como mucho cada `SESSION_TOUCH_S` (o si
+  cambió la IP): era un commit a disco por pedido.
+- **Anclas de la auditoría**: la cadena no ve que borren las últimas filas.
+  `anclar-auditoria` da el `id:hash` de la última para guardarlo fuera del
+  servidor, y `verificar-auditoria --ancla/--anclas-archivo` lo comprueba.
 - **Clave maestra**: derivadas por propósito con HKDF (`cripto.subclave`). Sin
   ella el backend no arranca (lifespan).
 
@@ -193,6 +204,23 @@ ingesta va ahí, no duplicada.
   mientras se siga trabajando sobre la misma planilla —mover fechas,
   recalcular— para no duplicar el plan; ante 409 o 404 guarda uno nuevo. Si el
   nombre era el automático, sigue a las fechas nuevas.
+- Corregir una tarea a mano (`PATCH /registro/tareas/{id}`) es sólo de
+  administradores. Cada campo que cambia deja una fila en `correcciones`
+  (usuario, valor anterior y nuevo) en la misma transacción; el autor sale de
+  la sesión, nunca del pedido. La tabla guarda cámara, plan y fecha propios
+  para sobrevivir al borrado del plan (`parada_id` queda en NULL).
+- Crear, reemplazar, editar o borrar un plan y cargar un seguimiento deja una
+  fila en `actividad` (quién, qué, plan), en la misma transacción del cambio.
+  Toda función de escritura de `services/registro.py` recibe el `Author` de
+  la sesión; un endpoint nuevo que escriba tiene que pasarlo.
+- **"Reprogramada" se resuelve con `paradas.plan_id`** (copia del plan de su
+  jornada, esquema v4) y el índice `(camara_id, plan_id)`. `v_recorridos` y
+  `v_planes` agregan sobre `paradas` directamente y no sobre `v_paradas`: un
+  LEFT JOIN a una vista obliga a SQLite a calcularla entera aunque se pida
+  una sola jornada (con años de datos, segundos por pedido). Si cambiás la
+  regla de "reprogramada", cambiala en las tres vistas. Las migraciones
+  viven en `database._migrate`, que corre antes de `esquema.sql` y borra las
+  vistas para que se vuelvan a crear.
 - El respaldo usa `VACUUM INTO`, no `conn.serialize()`: la base está en modo
   WAL y serializarla copia esa marca en el encabezado, y el archivo resultante
   no abre sin su `-wal`.
@@ -235,6 +263,12 @@ mapa base se dibuja, no hay ningún error en consola, y simplemente no aparece
 ningún punto ni recorrido. Está fijado en `^5.24.0`. No lo subas sin verificar
 que react-map-gl haya declarado soporte.
 
+`npm audit` marca maplibre-gl ≤ 6.4.0 como crítico (GHSA-jrc7-96c5-q579, un
+bypass de `DOM.sanitize()`) y su único arreglo es la v6. En maplibre 5 esa
+función la usa sólo el control de atribución, y acá el texto de atribución es
+fijo (`lib/mapStyle.ts`): ningún usuario mete HTML ahí. Por eso se queda en
+v5. Si algún día la atribución sale de datos externos, esto deja de valer.
+
 ### pandas 3.0 cambió dos comportamientos
 
 - Las columnas de texto usan un dtype `str` dedicado: comparar contra `object`
@@ -247,7 +281,16 @@ que react-map-gl haya declarado soporte.
 
 `/optimize/` es `async def` pero adentro corre `requests` y OR-Tools, que son
 sincrónicos. Se despachan con `anyio.to_thread.run_sync()`. Sin eso, un request
-con varios clusters congela el event loop y con él todo el servidor.
+con varios clusters congela el event loop y con él todo el servidor. Lo mismo
+el parseo de planillas (`read_headers`, `ingesta._ingest`): openpyxl y pandas
+van a un hilo. Un .xlsx se rechaza si descomprimido supera
+`MAX_XLSX_UNCOMPRESSED_BYTES` (bomba zip), antes de abrirlo.
+
+Dentro de `/optimize/`, cada grupo de clusters (sede) se resuelve en su propio
+hilo (`MAX_PARALLEL_SOLVES`): cada uno agota su límite de tiempo, y de a uno
+se sumaban. Medido: con el callback de tránsito en Python, OR-Tools suelta el
+GIL y los hilos corren a la vez; con `RegisterTransitMatrix` **no** (se
+serializan). No lo cambies a matriz sin volver a medir.
 
 ### Los clusters con la misma sede se resuelven juntos
 
@@ -280,7 +323,14 @@ transitable.
   sesión; escribir, `requiere_admin`. El limitador del catálogo está en
   `_LIMITADORES`.
 - Importar **combina por ID y nunca borra**; una celda vacía no pisa lo que
-  había. Cada importación recalcula la localidad de todo el catálogo.
+  había. La localidad se calcula sólo para las nuevas, las que se movieron
+  y las que habían quedado "Sin calcular", y fuera de la transacción.
+  Regenerar los límites con `preparar-municipios` recalcula todo el
+  catálogo; si se reemplaza el archivo a mano, corré `recalcular-localidades`.
+- `/catalogo/clusters` guarda en memoria el resultado por huella del
+  contenido (id/lat/lon de las cámaras, sedes y parámetros): cualquier
+  cambio lo invalida solo. Un test que parchee el agrupado tiene que llamar
+  `catalogo.limpiar_cache_clusters()`.
 - **La localidad es el municipio, calculado por coordenadas** con los límites
   del IGN en `app/data/municipios_salta.geojson` (`config.MUNICIPIOS_PATH`),
   que genera `python -m app.catalogo_cli preparar-municipios`. Punto en

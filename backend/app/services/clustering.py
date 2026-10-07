@@ -72,24 +72,24 @@ def reassign_noise(
         return labels, clusters
 
     new_labels = labels.copy()
+    # Arreglos numpy una sola vez: `iloc` y `to_numpy` por punto y por cluster
+    # dentro del bucle costaban más que la distancia misma.
+    all_lat = points["lat"].to_numpy(dtype=float)
+    all_lon = points["lon"].to_numpy(dtype=float)
     members_by_cluster = {
-        cluster["id"]: points.loc[labels == cluster["id"]] for cluster in clusters
+        cluster["id"]: (all_lat[labels == cluster["id"]], all_lon[labels == cluster["id"]])
+        for cluster in clusters
     }
 
     for idx in noise_indices:
-        noise_lat = float(points.iloc[idx]["lat"])
-        noise_lon = float(points.iloc[idx]["lon"])
+        noise_lat = float(all_lat[idx])
+        noise_lon = float(all_lon[idx])
 
         best_id: int | None = None
         best_distance = float("inf")
         for cluster_id in sorted(members_by_cluster):
-            members = members_by_cluster[cluster_id]
-            distance = haversine_km(
-                members["lat"].to_numpy(dtype=float),
-                members["lon"].to_numpy(dtype=float),
-                noise_lat,
-                noise_lon,
-            ).min()
+            member_lat, member_lon = members_by_cluster[cluster_id]
+            distance = haversine_km(member_lat, member_lon, noise_lat, noise_lon).min()
             if distance < best_distance:
                 best_distance = distance
                 best_id = int(cluster_id)

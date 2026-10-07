@@ -1,16 +1,15 @@
-"""Autenticación por API key y limitación de tasa en memoria.
+"""Limitación de tasa en memoria, por IP de origen.
 
-Pensado para un único proceso backend, sin base de datos ni sesiones: ver la
-justificación de cada mecanismo junto a su implementación.
+Pensado para un único proceso backend: ver la justificación junto a la
+implementación. La autenticación vive en `app/auth/`.
 """
 
-import hmac
 import time
 from collections import OrderedDict
 from threading import Lock
 from typing import Callable
 
-from fastapi import Header, HTTPException, Request
+from fastapi import HTTPException, Request
 
 from . import config
 from .red import client_ip
@@ -19,20 +18,6 @@ from .red import client_ip
 # expuesto a la red acumula una entrada por cada IP de origen que le llegue,
 # sin límite, mientras siga corriendo.
 MAX_TRACKED_KEYS = 10_000
-
-
-async def require_api_key(x_api_key: str | None = Header(default=None)) -> None:
-    """Exige `X-API-Key` cuando `API_KEY` está configurada.
-
-    Se lee `config.API_KEY` en cada llamada (no se fija en el import) para que
-    quede deshabilitado por defecto en desarrollo y activo apenas se setea la
-    variable de entorno, sin reiniciar nada más que el proceso. La comparación
-    es a tiempo constante para no filtrar la clave por temporización.
-    """
-    if not config.API_KEY:
-        return
-    if not hmac.compare_digest(x_api_key or "", config.API_KEY):
-        raise HTTPException(status_code=401, detail="API key inválida o ausente.")
 
 
 class SlidingWindowLimiter:

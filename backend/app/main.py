@@ -7,6 +7,7 @@ Stack 100% libre: FastAPI + pandas + scikit-learn (DBSCAN) + OR-Tools + OSRM loc
 import json
 import logging
 import math
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager
 from typing import AsyncIterator, NamedTuple
 
@@ -31,7 +32,7 @@ from .catalogo_route import router as catalogo_router
 from .export_route import router as export_router
 from .ingesta import MAX_SPAN_PLAUSIBLE_KM, ColumnMap, ingest_points
 from .registro_route import router as registro_router
-from .security import rate_limiter, require_api_key
+from .security import rate_limiter
 from .uploads import read_upload as _read_upload
 from .schemas import (
     Camera,
@@ -71,6 +72,10 @@ logger = logging.getLogger(__name__)
 _upload_rate_limit = rate_limiter(RATE_LIMIT_UPLOAD_MAX)
 _process_rate_limit = rate_limiter(RATE_LIMIT_PROCESS_MAX)
 _optimize_rate_limit = rate_limiter(RATE_LIMIT_OPTIMIZE_MAX)
+
+# Grupos de clusters (sedes) que se resuelven a la vez dentro de un /optimize/.
+# Más que los núcleos no rinde: cada solver ocupa uno entero hasta su límite.
+MAX_PARALLEL_SOLVES = 4
 
 
 @asynccontextmanager
@@ -120,7 +125,7 @@ def health() -> dict[str, str]:
 @app.post(
     "/upload-excel/",
     response_model=UploadExcelResponse,
-    dependencies=[Depends(_upload_rate_limit), Depends(require_api_key), Depends(requiere_sesion)],
+    dependencies=[Depends(_upload_rate_limit), Depends(requiere_sesion)],
 )
 async def upload_excel(file: UploadFile = File(...)) -> UploadExcelResponse:
     """Recibe una planilla y devuelve los encabezados de su primera fila.
@@ -130,11 +135,13 @@ async def upload_excel(file: UploadFile = File(...)) -> UploadExcelResponse:
     filename, raw = await _read_upload(file)
 
     try:
-        columns = read_headers(filename, raw)
+        # openpyxl es sincrónico: en el loop congelaría al resto de los pedidos.
+        columns = await anyio.to_thread.run_sync(read_headers, filename, raw)
     except Exception as exc:  # pandas/openpyxl levantan tipos muy variados
         # El detalle de pandas/openpyxl puede incluir rutas u otros datos
         # internos: se loguea server-side, no se reenvía tal cual al cliente.
-        logger.warning("No se pudo leer la planilla '%s': %s", filename, exc)
+        # %r: el nombre lo elige el cliente y podría traer saltos de línea.
+        logger.warning("No se pudo leer la planilla %r: %s", filename, exc)
         raise HTTPException(
             status_code=422,
             detail=(
@@ -293,7 +300,7 @@ async def _ingest_and_cluster(
 @app.post(
     "/process/",
     response_model=ProcessResponse,
-    dependencies=[Depends(_process_rate_limit), Depends(require_api_key), Depends(requiere_sesion)],
+    dependencies=[Depends(_process_rate_limit), Depends(requiere_sesion)],
 )
 async def process(
     file: UploadFile = File(...),
@@ -571,16 +578,27 @@ def _solve_routes(
     groups = _group_clusters_by_start(
         [cluster.id for cluster in result.clusters], cluster_starts, merge_clusters
     )
-    for group in groups:
-        members = [camera for camera in result.cameras if camera.cluster in group]
-        if not members:
-            continue
-        plan = _route_for_cluster(
+    jobs = [
+        (group, members)
+        for group in groups
+        if (members := [camera for camera in result.cameras if camera.cluster in group])
+    ]
+
+    def solve(job: tuple[list[int], list[Camera]]) -> ClusterPlan:
+        group, members = job
+        return _route_for_cluster(
             group[0], members, cluster_starts[group[0]], engine, rules, cluster_ids=group
         )
-        routes.extend(plan.routes)
-        out_of_reach.extend(plan.out_of_reach)
-        left_out.extend(plan.left_out)
+
+    # Cada grupo agota su límite de tiempo de OR-Tools: de a uno, seis sedes
+    # serían seis límites seguidos. OR-Tools suelta el GIL mientras busca
+    # (medido), así que los hilos corren de verdad a la vez. `map` conserva el
+    # orden de los grupos.
+    with ThreadPoolExecutor(max_workers=min(MAX_PARALLEL_SOLVES, len(jobs) or 1)) as pool:
+        for plan in pool.map(solve, jobs):
+            routes.extend(plan.routes)
+            out_of_reach.extend(plan.out_of_reach)
+            left_out.extend(plan.left_out)
 
     avisos = [warning] if warning else []
     unreachable = sum(1 for route in routes if route.has_unreachable_legs)
@@ -643,7 +661,7 @@ def _unserved_warning(unserved: list[Camera]) -> str:
 @app.post(
     "/optimize/",
     response_model=OptimizeResponse,
-    dependencies=[Depends(_optimize_rate_limit), Depends(require_api_key), Depends(requiere_sesion)],
+    dependencies=[Depends(_optimize_rate_limit), Depends(requiere_sesion)],
 )
 async def optimize(
     file: UploadFile = File(...),

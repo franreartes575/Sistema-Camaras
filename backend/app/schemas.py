@@ -377,6 +377,8 @@ class Task(BaseModel):
     observation: str | None
     status: TaskStatus
     verified_at: str | None
+    corrected_by: str | None = Field(None, description="Quién la corrigió a mano por última vez")
+    corrected_at: str | None = Field(None, description="Cuándo fue esa última corrección")
 
 
 class RouteDetail(RouteSummary):

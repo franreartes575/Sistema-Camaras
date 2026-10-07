@@ -9,7 +9,7 @@ from fastapi import APIRouter, Depends, Response
 
 from .config import RATE_LIMIT_UPLOAD_MAX
 from .schemas import ExportRequest
-from .security import rate_limiter, require_api_key
+from .security import rate_limiter
 from .services.export import build_plan_workbook, export_filename
 
 XLSX_MIME = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
@@ -21,7 +21,7 @@ export_rate_limit = rate_limiter(RATE_LIMIT_UPLOAD_MAX)
 @router.post(
     "/export/",
     response_class=Response,
-    dependencies=[Depends(export_rate_limit), Depends(require_api_key)],
+    dependencies=[Depends(export_rate_limit)],
 )
 def export_plan(plan: ExportRequest) -> Response:
     """Devuelve el .xlsx de seguimiento para que lo completen los técnicos.

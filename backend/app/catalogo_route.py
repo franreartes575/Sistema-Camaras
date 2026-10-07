@@ -26,7 +26,7 @@ from .schemas import (
     Depot,
     DepotIn,
 )
-from .security import rate_limiter, require_api_key
+from .security import rate_limiter
 from .services import catalogo
 from .services.clustering import DEPOT_MAX_KM
 from .services.export import build_catalog_workbook, catalog_filename
@@ -41,7 +41,7 @@ catalogo_rate_limit = rate_limiter(RATE_LIMIT_CATALOGO_MAX)
 router = APIRouter(
     prefix="/catalogo",
     tags=["catalogo"],
-    dependencies=[Depends(catalogo_rate_limit), Depends(require_api_key)],
+    dependencies=[Depends(catalogo_rate_limit)],
 )
 
 Db = Annotated[sqlite3.Connection, Depends(get_db)]

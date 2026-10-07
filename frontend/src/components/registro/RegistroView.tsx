@@ -40,7 +40,7 @@ import {
   type FollowUpResult,
   type PlanSummary,
   type RegistryFilters,
-  type ReportedStatus,
+  type TaskChanges,
   type RouteDetail,
   type RouteSummary,
   type Task,
@@ -92,13 +92,15 @@ function sortTasks(tasks: Task[]): Task[] {
 type Props = {
   /** Se incrementa desde afuera cuando el planificador guardó o sincronizó algo. */
   refreshKey: number;
+  /** Corregir tareas a mano es sólo de administradores (el backend lo exige igual). */
+  canEditTasks: boolean;
   mobileView: "panel" | "map";
   onShowMap: () => void;
   /** Lleva un Excel de tareas pendientes al planificador. */
   onPlanTasks: (file: File) => void;
 };
 
-export default function RegistroView({ refreshKey, mobileView, onShowMap, onPlanTasks }: Props) {
+export default function RegistroView({ refreshKey, canEditTasks, mobileView, onShowMap, onPlanTasks }: Props) {
   const [today] = useState(todayIso);
   const [baseFilters, setBaseFilters] = useState<RegistryFilters>(EMPTY_FILTERS);
   // "none": todavía no eligió nada, no se muestra ningún plan. null: eligió "Todos los planes".
@@ -276,14 +278,16 @@ export default function RegistroView({ refreshKey, mobileView, onShowMap, onPlan
 
   // ------------------------------------------------------------ acciones
 
-  const changeTaskStatus = async (task: Task, status: ReportedStatus) => {
+  const changeTask = async (task: Task, changes: TaskChanges): Promise<boolean> => {
     setBusyTaskId(task.id);
     setActionError(null);
     try {
-      await updateTask(task.id, { status });
+      await updateTask(task.id, changes);
       refresh();
+      return true;
     } catch (err) {
       setActionError(errorMessage(err));
+      return false;
     } finally {
       setBusyTaskId(null);
     }
@@ -500,7 +504,7 @@ export default function RegistroView({ refreshKey, mobileView, onShowMap, onPlan
                 onToggle={toggleRoute}
                 onSetMany={setMany}
                 onFocus={focusRoute}
-                onTaskStatus={changeTaskStatus}
+                onTaskUpdate={canEditTasks ? changeTask : undefined}
               />
               </div>
             )}
@@ -513,7 +517,7 @@ export default function RegistroView({ refreshKey, mobileView, onShowMap, onPlan
                 isPlanning={isPlanning}
                 isDownloading={isDownloading}
                 onViewChange={setTaskView}
-                onTaskStatus={changeTaskStatus}
+                onTaskUpdate={canEditTasks ? changeTask : undefined}
                 onShowRoute={showTaskRoute}
                 onPlan={planPending}
                 onDownload={downloadTaskList}

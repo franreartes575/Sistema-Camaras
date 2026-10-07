@@ -58,11 +58,10 @@ MAX_UPLOAD_BYTES: int = 32 * 1024 * 1024
 # Tamaño de cada bloque al leer el archivo subido.
 UPLOAD_CHUNK_BYTES: int = 1024 * 1024
 
-# Clave exigida en el header `X-API-Key` para los endpoints que reciben
-# archivos. Vacía por defecto: deshabilita el chequeo para desarrollo local
-# sin configuración extra. Antes de exponer el servicio a la red hay que
-# setearla — ver la sección correspondiente en CLAUDE.md.
-API_KEY: str = os.getenv("API_KEY", "")
+# Tope de un .xlsx descomprimido. Es un zip: pocos MB pueden expandirse a
+# gigas (una "bomba zip") y openpyxl los carga enteros en memoria. Una
+# planilla de 20.000 cámaras ronda los 10 MB descomprimida.
+MAX_XLSX_UNCOMPRESSED_BYTES: int = 100 * 1024 * 1024
 
 # Limitación de tasa en memoria, por IP de origen. No sobrevive un reinicio
 # del proceso ni se comparte entre réplicas: alcanza para un único backend
@@ -111,6 +110,10 @@ SESSION_IDLE_MINUTES: int = _int("SESSION_IDLE_MINUTES", 15)
 SESSION_ABSOLUTE_HOURS: int = _int("SESSION_ABSOLUTE_HOURS", 8)
 SESSION_ROTATE_MINUTES: int = _int("SESSION_ROTATE_MINUTES", 5)
 SESSION_ROTATION_GRACE_S: int = _int("SESSION_ROTATION_GRACE_S", 30)
+# La última actividad de una sesión se escribe como mucho cada tantos
+# segundos (o si cambió la IP): cada escritura es un commit a disco, y la
+# inactividad se mide en minutos.
+SESSION_TOUCH_S: int = _int("SESSION_TOUCH_S", 30)
 MAX_SESSIONS_PER_USER: int = _int("MAX_SESSIONS_PER_USER", 3)
 # Un cambio de navegador a mitad de sesión es una cookie copiada a otro equipo.
 SESSION_BIND_USER_AGENT: bool = os.getenv("SESSION_BIND_USER_AGENT", "1").lower() in (
@@ -124,6 +127,12 @@ SESSION_BIND_USER_AGENT: bool = os.getenv("SESSION_BIND_USER_AGENT", "1").lower(
 LOCKOUT_THRESHOLD: int = _int("LOCKOUT_THRESHOLD", 5)
 LOCKOUT_BASE_MINUTES: int = _int("LOCKOUT_BASE_MINUTES", 15)
 LOCKOUT_MAX_TEMPORARY: int = _int("LOCKOUT_MAX_TEMPORARY", 3)
+# Ni el bloqueo ni el límite por usuario se aplican desde una IP en la que ese
+# usuario abrió sesión en los últimos LOCKOUT_KNOWN_IP_DAYS días: frenan a
+# quien prueba contraseñas desde afuera sin dejar sin acceso al dueño de la
+# cuenta (con un solo administrador, eso sería dejar sin acceso al sistema).
+# El límite por IP sí se aplica siempre.
+LOCKOUT_KNOWN_IP_DAYS: int = _int("LOCKOUT_KNOWN_IP_DAYS", 90)
 
 # Límite de intentos fallidos en la ventana, por IP y por nombre de usuario
 # (exista o no: si no, el límite delataría qué usuarios existen). Se cuentan en

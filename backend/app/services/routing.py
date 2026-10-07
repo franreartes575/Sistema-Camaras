@@ -210,12 +210,10 @@ class OsrmProvider:
         if not rows:
             raise RoutingError(f"OSRM no devolvió matriz de {key}.")
 
-        return np.array(
-            [
-                [np.inf if value is None else float(value) for value in row]
-                for row in rows
-            ]
-        )
+        # numpy convierte los `null` (None) en NaN en C, sin recorrer las n²
+        # celdas en Python; un tramo inalcanzable vale infinito, nunca cero.
+        matrix = np.array(rows, dtype=float)
+        return np.where(np.isnan(matrix), np.inf, matrix)
 
     def route_geometry(self, points: Sequence[Point]) -> list[Point]:
         """Polilínea del recorrido real, devuelta como `(lat, lon)`."""

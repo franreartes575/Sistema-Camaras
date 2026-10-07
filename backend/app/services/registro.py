@@ -65,6 +65,33 @@ class Filters:
     query: str | None = None
 
 
+@dataclass(frozen=True)
+class Author:
+    """Quién hace un cambio en el registro (sale de la sesión, nunca del pedido)."""
+
+    username: str
+    name: str
+
+
+def _log(
+    conn: sqlite3.Connection,
+    author: Author,
+    action: str,
+    plan_id: int | None,
+    detail: str | None = None,
+) -> None:
+    """Agrega una fila a `actividad`. Va dentro de la transacción del cambio:
+    si el cambio no se confirma, el registro tampoco."""
+    row = conn.execute("SELECT nombre FROM planes WHERE id = ?", (plan_id,)).fetchone()
+    conn.execute(
+        """
+        INSERT INTO actividad (en, usuario, nombre, accion, plan_id, plan_nombre, detalle)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
+        """,
+        (_now(), author.username, author.name, action, plan_id, row["nombre"] if row else None, detail),
+    )
+
+
 _PLAN_COLUMNS = """
     id, nombre AS name, creado_en AS created_at, archivo_origen AS source_file,
     motor AS provider, por_calle AS is_road_network, notas AS notes,
@@ -90,7 +117,11 @@ _TASK_COLUMNS = """
     v.camara_id AS camera_id, v.lat, v.lon, v.descripcion AS label,
     v.nodo_preliminar AS node, v.nodo_migrado AS migrated_node,
     v.observacion AS observation, v.estado_actual AS status,
-    v.verificado_en AS verified_at
+    v.verificado_en AS verified_at,
+    (SELECT c.nombre FROM correcciones c WHERE c.parada_id = v.id
+     ORDER BY c.id DESC LIMIT 1) AS corrected_by,
+    (SELECT c.corregido_en FROM correcciones c WHERE c.parada_id = v.id
+     ORDER BY c.id DESC LIMIT 1) AS corrected_at
 """
 
 
@@ -200,13 +231,13 @@ def _insert_routes(conn: sqlite3.Connection, plan_id: int, routes: list[Registry
             """
             INSERT INTO paradas (
                 recorrido_id, orden, camara_id, lat, lon, descripcion,
-                nodo_preliminar, observacion
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                nodo_preliminar, observacion, plan_id
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             [
                 (
                     cursor.lastrowid, order, stop.camera_id.strip(), stop.lat, stop.lon,
-                    _clean(stop.label), _clean(stop.node), _clean(stop.observation),
+                    _clean(stop.label), _clean(stop.node), _clean(stop.observation), plan_id,
                 )
                 for order, stop in enumerate(route.stops, start=1)
             ],
@@ -225,7 +256,7 @@ def list_plans(conn: sqlite3.Connection) -> list[PlanSummary]:
     return [PlanSummary(**dict(row)) for row in rows]
 
 
-def create_plan(conn: sqlite3.Connection, plan: RegistryPlanIn) -> PlanSummary:
+def create_plan(conn: sqlite3.Connection, plan: RegistryPlanIn, author: Author) -> PlanSummary:
     """Guarda un plan nuevo con todas sus jornadas y paradas."""
     with conn:
         cursor = conn.execute(
@@ -240,10 +271,13 @@ def create_plan(conn: sqlite3.Connection, plan: RegistryPlanIn) -> PlanSummary:
         )
         plan_id = int(cursor.lastrowid or 0)
         _insert_routes(conn, plan_id, plan.routes)
+        _log(conn, author, "plan_creado", plan_id)
     return get_plan(conn, plan_id)
 
 
-def replace_plan(conn: sqlite3.Connection, plan_id: int, plan: RegistryPlanIn) -> PlanSummary:
+def replace_plan(
+    conn: sqlite3.Connection, plan_id: int, plan: RegistryPlanIn, author: Author
+) -> PlanSummary:
     """Reemplaza las jornadas de un plan que todavía no tiene seguimiento.
 
     Es lo que pasa al volver a exportar el mismo plan con otras fechas: no
@@ -283,21 +317,28 @@ def replace_plan(conn: sqlite3.Connection, plan_id: int, plan: RegistryPlanIn) -
             (name, _clean(plan.source_file), _clean(plan.provider), int(plan.is_road_network), plan_id),
         )
         _insert_routes(conn, plan_id, plan.routes)
+        _log(conn, author, "plan_reemplazado", plan_id)
     return get_plan(conn, plan_id)
 
 
-def update_plan(conn: sqlite3.Connection, plan_id: int, changes: PlanUpdate) -> PlanSummary:
+def update_plan(
+    conn: sqlite3.Connection, plan_id: int, changes: PlanUpdate, author: Author
+) -> PlanSummary:
     with conn:
         get_plan(conn, plan_id)
         if "name" in changes.model_fields_set and _clean(changes.name):
             conn.execute("UPDATE planes SET nombre = ? WHERE id = ?", (_clean(changes.name), plan_id))
         if "notes" in changes.model_fields_set:
             conn.execute("UPDATE planes SET notas = ? WHERE id = ?", (_clean(changes.notes), plan_id))
+        _log(conn, author, "plan_editado", plan_id)
     return get_plan(conn, plan_id)
 
 
-def delete_plan(conn: sqlite3.Connection, plan_id: int) -> None:
+def delete_plan(conn: sqlite3.Connection, plan_id: int, author: Author) -> None:
     with conn:
+        # Antes de borrar, para que quede el nombre. Si el plan no existe, la
+        # excepción deshace también el registro.
+        _log(conn, author, "plan_borrado", plan_id)
         if conn.execute("DELETE FROM planes WHERE id = ?", (plan_id,)).rowcount == 0:
             raise NotFoundError(f"No existe el plan {plan_id} en el registro.")
 
@@ -376,26 +417,58 @@ def get_task(conn: sqlite3.Connection, task_id: int) -> Task:
     return Task(**dict(row))
 
 
-def update_task(conn: sqlite3.Connection, task_id: int, changes: TaskUpdate) -> Task:
-    """Corrección manual: estado, observación o nodo migrado de una tarea."""
+def _requested_values(changes: TaskUpdate) -> dict[str, str | None]:
+    """Columna de `paradas` → valor pedido, sólo de los campos que vinieron."""
     fields = changes.model_fields_set
-    assignments: list[str] = []
-    params: list = []
+    values: dict[str, str | None] = {}
     if "status" in fields and changes.status is not None:
-        assignments.append("estado = ?")
-        params.append(changes.status)
+        values["estado"] = changes.status
     if "observation" in fields:
-        assignments.append("observacion = ?")
-        params.append(_clean(changes.observation))
+        values["observacion"] = _clean(changes.observation)
     if "migrated_node" in fields:
-        assignments.append("nodo_migrado = ?")
-        params.append(_clean(changes.migrated_node))
+        values["nodo_migrado"] = _clean(changes.migrated_node)
+    return values
+
+
+def update_task(conn: sqlite3.Connection, task_id: int, changes: TaskUpdate, author: Author) -> Task:
+    """Corrección manual: estado, observación o nodo migrado de una tarea.
+
+    Cada campo que de verdad cambia queda en `correcciones` con su autor y el
+    valor anterior, en la misma transacción. Pedir lo que ya estaba no toca
+    nada (ni `verificado_en`).
+    """
+    requested = _requested_values(changes)
     with conn:
-        get_task(conn, task_id)
-        if assignments:
+        current = conn.execute(
+            """
+            SELECT pa.estado, pa.observacion, pa.nodo_migrado, pa.camara_id, r.plan_id, r.fecha
+            FROM paradas pa JOIN recorridos r ON r.id = pa.recorrido_id
+            WHERE pa.id = ?
+            """,
+            (task_id,),
+        ).fetchone()
+        if current is None:
+            raise NotFoundError(f"No existe la tarea {task_id} en el registro.")
+        changed = {column: value for column, value in requested.items() if current[column] != value}
+        if changed:
+            now = _now()
+            # Los nombres de columna salen de `_requested_values`, nunca del pedido.
+            assignments = ", ".join(f"{column} = ?" for column in changed)
             conn.execute(
-                f"UPDATE paradas SET {', '.join(assignments)}, verificado_en = ? WHERE id = ?",
-                params + [_now(), task_id],
+                f"UPDATE paradas SET {assignments}, verificado_en = ? WHERE id = ?",
+                [*changed.values(), now, task_id],
+            )
+            conn.executemany(
+                """
+                INSERT INTO correcciones (parada_id, plan_id, camara_id, fecha, corregido_en,
+                                          usuario, nombre, campo, valor_anterior, valor_nuevo)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                [
+                    (task_id, current["plan_id"], current["camara_id"], current["fecha"], now,
+                     author.username, author.name, column, current[column], value)
+                    for column, value in changed.items()
+                ],
             )
     return get_task(conn, task_id)
 
@@ -591,7 +664,9 @@ def _pick_targets(candidates: list[_Candidate], date: dt.date | None) -> list[_C
     return [max(candidates, key=lambda candidate: (candidate.plan_id, candidate.date))]
 
 
-def import_follow_up(conn: sqlite3.Connection, filename: str, raw: bytes) -> FollowUpResult:
+def import_follow_up(
+    conn: sqlite3.Connection, filename: str, raw: bytes, author: Author
+) -> FollowUpResult:
     """Actualiza el registro con un Excel de seguimiento completado.
 
     Cada fila se cruza con su tarea por cámara y fecha planificada (y por plan,
@@ -667,6 +742,10 @@ def import_follow_up(conn: sqlite3.Connection, filename: str, raw: bytes) -> Fol
             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (filename, digest, now, plan_id, len(rows), matched, updated, done, not_done, len(unmatched)),
+        )
+        _log(
+            conn, author, "seguimiento_cargado", plan_id,
+            f"{filename}: {updated} tarea(s) actualizada(s) de {len(rows)} fila(s)",
         )
 
     plan_name = None

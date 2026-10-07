@@ -73,6 +73,9 @@ export type Task = {
   observation: string | null;
   status: TaskStatus;
   verified_at: string | null;
+  /** Quién la corrigió a mano por última vez, y cuándo (hora local del servidor). */
+  corrected_by: string | null;
+  corrected_at: string | null;
 };
 
 export type RouteDetail = RouteSummary & {
@@ -207,10 +210,13 @@ export function deletePlan(planId: number): Promise<void> {
   return request<void>(`/registro/planes/${planId}`, { method: "DELETE" });
 }
 
-export function updateTask(
-  taskId: number,
-  changes: { status?: ReportedStatus; observation?: string | null; migrated_node?: string | null },
-): Promise<Task> {
+export type TaskChanges = {
+  status?: ReportedStatus;
+  observation?: string | null;
+  migrated_node?: string | null;
+};
+
+export function updateTask(taskId: number, changes: TaskChanges): Promise<Task> {
   return sendJson<Task>(`/registro/tareas/${taskId}`, "PATCH", changes);
 }
 

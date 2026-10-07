@@ -1,13 +1,14 @@
 """Administración de cuentas y auditoría desde la consola del servidor.
 
     python -m app.auth.cli inicializar
-    python -m app.auth.cli crear-usuario --usuario jperez --nombre "Juan Pérez" --rol operador
+    python -m app.auth.cli crear-usuario --usuario jperez --nombre "Juan Pérez"
     python -m app.auth.cli listar-usuarios
     python -m app.auth.cli desbloquear --usuario jperez
     python -m app.auth.cli resetear-password --usuario jperez
     python -m app.auth.cli deshabilitar --usuario jperez        (y habilitar)
     python -m app.auth.cli revocar-sesiones --usuario jperez
-    python -m app.auth.cli verificar-auditoria
+    python -m app.auth.cli anclar-auditoria [--archivo \\\\otro-equipo\\anclas.txt]
+    python -m app.auth.cli verificar-auditoria [--ancla ID:HASH ...] [--anclas-archivo anclas.txt]
     python -m app.auth.cli exportar-auditoria --salida accesos.csv [--desde 2026-10-01] [--hasta 2026-10-31]
 
 No hay endpoint HTTP para crear o desbloquear cuentas a propósito: hace falta
@@ -114,17 +115,59 @@ def _resetear_password(args: argparse.Namespace) -> None:
     print("Contraseña provisoria puesta; la va a tener que cambiar al entrar. Sesiones cerradas.")
 
 
-def _verificar(_: argparse.Namespace) -> None:
+def _anclas_pedidas(args: argparse.Namespace) -> list[tuple[int, str]]:
+    textos = list(args.ancla or [])
+    if args.anclas_archivo:
+        textos += [linea.split()[0] for linea in Path(args.anclas_archivo).read_text(encoding="utf-8").splitlines()
+                   if linea.strip() and not linea.lstrip().startswith("#")]
+    try:
+        return [auditoria.leer_ancla(texto) for texto in textos]
+    except ValueError as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        sys.exit(1)
+
+
+def _verificar(args: argparse.Namespace) -> None:
+    anclas = _anclas_pedidas(args)
     conn = db.connect()
     try:
         resultado = auditoria.verificar_cadena(conn)
+        faltantes = [ident for ident, firma in anclas if not auditoria.ancla_presente(conn, ident, firma)]
     finally:
         conn.close()
-    if resultado.integra:
-        print(f"Auditoría íntegra: {resultado.filas} eventos, cadena completa.")
+    if not resultado.integra:
+        print(f"AUDITORÍA ALTERADA: la cadena se rompe en el evento id={resultado.primera_alterada}.")
+        sys.exit(2)
+    if faltantes:
+        lista = ", ".join(f"id={ident}" for ident in faltantes)
+        print(f"AUDITORÍA ALTERADA: no coincide(n) el/las ancla(s) {lista}: se borraron o rehicieron eventos.")
+        sys.exit(2)
+    print(f"Auditoría íntegra: {resultado.filas} eventos, cadena completa.")
+    if anclas:
+        print(f"Coinciden {len(anclas)} ancla(s).")
+    else:
+        print("Sin anclas no se puede descartar que hayan borrado los últimos eventos (ver anclar-auditoria).")
+
+
+def _anclar(args: argparse.Namespace) -> None:
+    conn = db.connect()
+    try:
+        ancla = auditoria.ancla_actual(conn)
+    finally:
+        conn.close()
+    if ancla is None:
+        print("La auditoría está vacía: no hay nada que anclar.")
         return
-    print(f"AUDITORÍA ALTERADA: la cadena se rompe en el evento id={resultado.primera_alterada}.")
-    sys.exit(2)
+    linea = f"{ancla.texto} {ancla.ts}"
+    if args.archivo:
+        destino = Path(args.archivo)
+        destino.parent.mkdir(parents=True, exist_ok=True)
+        with destino.open("a", encoding="utf-8") as archivo:
+            archivo.write(linea + "\n")
+        print(f"Ancla agregada a {destino}:")
+    else:
+        print("Guardá esta ancla FUERA de este servidor (otro equipo, papel, un mail):")
+    print(f"  {ancla.texto}  ({ancla.ts})")
 
 
 def _exportar(args: argparse.Namespace) -> None:
@@ -145,7 +188,7 @@ def main(argv: list[str] | None = None) -> None:
     crear = comandos.add_parser("crear-usuario", help="Alta de una cuenta (pide la contraseña)")
     crear.add_argument("--usuario", required=True)
     crear.add_argument("--nombre", required=True)
-    crear.add_argument("--rol", choices=("admin", "operador"), default="operador")
+    crear.add_argument("--rol", choices=("admin", "operador"), default="admin")
     crear.add_argument(
         "--sin-cambio-obligatorio", action="store_true",
         help="No obligar a cambiar la contraseña en el primer ingreso",
@@ -168,7 +211,16 @@ def main(argv: list[str] | None = None) -> None:
     resetear.add_argument("--usuario", required=True)
     resetear.set_defaults(fn=_resetear_password)
 
-    comandos.add_parser("verificar-auditoria", help="Comprueba que nadie alteró la auditoría").set_defaults(fn=_verificar)
+    verificar = comandos.add_parser("verificar-auditoria", help="Comprueba que nadie alteró la auditoría")
+    verificar.add_argument("--ancla", action="append", help="id:hash guardado con anclar-auditoria (repetible)")
+    verificar.add_argument("--anclas-archivo", help="Archivo con una ancla por línea")
+    verificar.set_defaults(fn=_verificar)
+
+    anclar = comandos.add_parser(
+        "anclar-auditoria", help="Ancla de la última fila, para guardar fuera del servidor"
+    )
+    anclar.add_argument("--archivo", help="Agrega el ancla a este archivo (mejor en otro equipo)")
+    anclar.set_defaults(fn=_anclar)
 
     exportar = comandos.add_parser("exportar-auditoria", help="Auditoría a CSV (para un pedido judicial)")
     exportar.add_argument("--salida", required=True)

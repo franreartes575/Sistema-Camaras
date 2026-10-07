@@ -17,7 +17,15 @@ from . import config
 # Subirlo cuando cambie el esquema, junto con la migración que corresponda.
 # 2: catálogo de cámaras, sedes e importaciones del catálogo. Son tablas
 #    nuevas, así que `IF NOT EXISTS` alcanza y no hace falta migrar nada.
-SCHEMA_VERSION = 2
+# 3: historial de correcciones manuales y actividad sobre los planes (tablas
+#    nuevas, tampoco hace falta migrar).
+# 4: `paradas.plan_id` (copia del plan de su jornada) para que "reprogramada"
+#    se resuelva con un índice; ver `_migrate`.
+SCHEMA_VERSION = 4
+
+# Vistas que dependen de `paradas`: el esquema las crea con IF NOT EXISTS, así
+# que para cambiarlas hay que borrarlas antes (de la que depende de otra a la base).
+_VIEWS = ("v_planes", "v_recorridos", "v_paradas")
 
 _SCHEMA_FILE = Path(__file__).with_name("esquema.sql")
 
@@ -27,6 +35,28 @@ _initialized: set[str] = set()
 _init_lock = Lock()
 
 
+def _columns(conn: sqlite3.Connection, table: str) -> set[str]:
+    return {row[1] for row in conn.execute(f"PRAGMA table_info({table})")}
+
+
+def _migrate(conn: sqlite3.Connection) -> None:
+    """Lleva una base existente al esquema actual. Corre antes de `esquema.sql`,
+    que sólo crea lo que falta y no altera tablas ni vistas que ya existen."""
+    version = conn.execute("PRAGMA user_version").fetchone()[0]
+    if version >= SCHEMA_VERSION:
+        return
+    with conn:
+        if "paradas" in {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type = 'table'")}:
+            if "plan_id" not in _columns(conn, "paradas"):  # v4
+                conn.execute("ALTER TABLE paradas ADD COLUMN plan_id INTEGER")
+                conn.execute(
+                    "UPDATE paradas SET plan_id = "
+                    "(SELECT r.plan_id FROM recorridos r WHERE r.id = paradas.recorrido_id)"
+                )
+        for view in _VIEWS:
+            conn.execute(f"DROP VIEW IF EXISTS {view}")
+
+
 def _ensure_schema(conn: sqlite3.Connection, db_path: str) -> None:
     with _init_lock:
         if db_path in _initialized:
@@ -34,6 +64,7 @@ def _ensure_schema(conn: sqlite3.Connection, db_path: str) -> None:
         # WAL: las lecturas del registro no se bloquean mientras se carga un
         # seguimiento, y una caída a mitad de escritura no corrompe la base.
         conn.execute("PRAGMA journal_mode = WAL")
+        _migrate(conn)
         conn.executescript(_SCHEMA_FILE.read_text(encoding="utf-8"))
         conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
         _initialized.add(db_path)

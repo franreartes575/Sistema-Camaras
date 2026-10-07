@@ -76,7 +76,8 @@ cd backend
 ```
 
 Baja la capa `municipio` del WFS del IGN filtrada a Salta, la simplifica (unos
-cientos de KB), la guarda y recalcula la localidad de todo el catálogo. Si el
+cientos de KB), la guarda y recalcula la localidad de todo el catálogo (si
+reemplazás el archivo a mano, corré `recalcular-localidades`). Si el
 servidor no tiene salida a internet, se baja el GeoJSON en otra máquina y se
 pasa con `--archivo municipios.geojson`. Conviene versionar el archivo
 generado. Mientras no exista, la localidad figura como "Sin calcular". Un
@@ -278,7 +279,16 @@ revocación y acción administrativa, con hora UTC en microsegundos, IP real del
 cliente (resuelta detrás de proxies de confianza), IP de conexión,
 `X-Forwarded-For` crudo, navegador y usuario intentado. Es de sólo agregado
 (triggers) y cada fila está encadenada con un HMAC de la anterior: borrar o
-editar una fila se detecta con `verificar-auditoria`.
+editar una fila se detecta con `verificar-auditoria`. Lo único que la cadena
+sola no ve es que alguien con acceso al archivo borre las **últimas** filas;
+para eso, guardá cada tanto un ancla fuera del servidor (otro equipo, una
+carpeta compartida) y pasala al verificar. Se puede programar con el
+Programador de tareas de Windows, por ejemplo una vez por día:
+
+```powershell
+.\venv\Scripts\python.exe -m app.auth.cli anclar-auditoria --archivo \\otro-equipo\camaras\anclas.txt
+.\venv\Scripts\python.exe -m app.auth.cli verificar-auditoria --anclas-archivo \\otro-equipo\camaras\anclas.txt
+```
 
 **Administración** (desde la consola del servidor, nunca por la web):
 
@@ -365,7 +375,7 @@ Todas exigen sesión. Desde el navegador se llaman como `/api/...`.
 | `GET /registro/recorridos/detalle?ids=…` | Jornadas completas con paradas y polilínea |
 | `GET /registro/tareas/` | Tareas con su estado; `estado=faltan` = pendientes + no realizadas |
 | `GET /registro/tareas.xlsx` | Las mismas tareas como Excel reimportable en el planificador |
-| `PATCH /registro/tareas/{id}` | Corrige a mano estado, observación o nodo migrado |
+| `PATCH /registro/tareas/{id}` | Corrige a mano estado, observación o nodo migrado (administradores; queda en `correcciones` quién y qué) |
 | `POST /registro/seguimiento/` | Carga un Excel de seguimiento completado |
 | `GET /registro/cargas/` | Historial de seguimientos cargados |
 | `GET /registro/respaldo` | La base completa como `.sqlite` |

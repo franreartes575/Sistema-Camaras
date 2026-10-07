@@ -1,51 +1,11 @@
-"""Tests de autenticación por API key y del limitador de tasa en memoria."""
+"""Tests del limitador de tasa en memoria."""
 
-import asyncio
 from unittest.mock import Mock
 
 import pytest
 from fastapi import HTTPException
 
-from app import config
-from app.security import SlidingWindowLimiter, require_api_key
-
-
-def _check_api_key(x_api_key: str | None) -> None:
-    """Corre la dependencia async fuera de un event loop, como en los tests."""
-    asyncio.run(require_api_key(x_api_key=x_api_key))
-
-
-# --------------------------------------------------------------------------
-# require_api_key
-# --------------------------------------------------------------------------
-
-
-def test_require_api_key_deshabilitado_sin_configurar(monkeypatch) -> None:
-    """Sin API_KEY seteada, el chequeo no bloquea nada (desarrollo local)."""
-    monkeypatch.setattr(config, "API_KEY", "")
-
-    _check_api_key(None)
-    _check_api_key("cualquiera")
-
-
-def test_require_api_key_rechaza_clave_incorrecta(monkeypatch) -> None:
-    """Con API_KEY seteada, una clave ausente o distinta se rechaza con 401."""
-    monkeypatch.setattr(config, "API_KEY", "secreta")
-
-    with pytest.raises(HTTPException) as exc_info:
-        _check_api_key(None)
-    assert exc_info.value.status_code == 401
-
-    with pytest.raises(HTTPException) as exc_info:
-        _check_api_key("otra")
-    assert exc_info.value.status_code == 401
-
-
-def test_require_api_key_acepta_clave_correcta(monkeypatch) -> None:
-    """La clave correcta pasa sin levantar excepción."""
-    monkeypatch.setattr(config, "API_KEY", "secreta")
-
-    _check_api_key("secreta")
+from app.security import SlidingWindowLimiter
 
 
 # --------------------------------------------------------------------------

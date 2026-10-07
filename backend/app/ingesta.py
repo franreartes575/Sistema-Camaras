@@ -10,6 +10,7 @@ acá para no duplicarse.
 import logging
 from typing import NamedTuple
 
+import anyio
 import pandas as pd
 from fastapi import Form, HTTPException, UploadFile
 
@@ -93,15 +94,21 @@ def mapping_warning(span_km: float, valid: int, total: int, origen: str) -> str 
 
 async def ingest_points(file: UploadFile, columns: ColumnMap) -> Ingested:
     """Lee la planilla, aparta lo realizado y valida coordenadas."""
-    col_lat, col_lon, col_coords = columns.col_lat, columns.col_lon, columns.col_coords
     filename, raw = await read_upload(file)
+    # pandas y openpyxl son sincrónicos y pueden tardar segundos con una
+    # planilla grande: a un hilo, para no congelar al resto de los pedidos.
+    return await anyio.to_thread.run_sync(_ingest, filename, raw, columns)
 
+
+def _ingest(filename: str, raw: bytes, columns: ColumnMap) -> Ingested:
+    col_lat, col_lon, col_coords = columns.col_lat, columns.col_lon, columns.col_coords
     try:
         frame = read_dataframe(filename, raw)
     except Exception as exc:  # pandas/openpyxl levantan tipos muy variados
         # El detalle puede incluir rutas u otros datos internos: se loguea
-        # server-side, no se reenvía tal cual al cliente.
-        logger.warning("No se pudo leer la planilla '%s': %s", filename, exc)
+        # server-side, no se reenvía tal cual al cliente. %r: el nombre lo
+        # elige el cliente y podría traer saltos de línea.
+        logger.warning("No se pudo leer la planilla %r: %s", filename, exc)
         raise HTTPException(status_code=422, detail=_UNREADABLE) from exc
 
     total_rows = len(frame)

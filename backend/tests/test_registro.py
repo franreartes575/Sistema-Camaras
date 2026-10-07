@@ -551,6 +551,140 @@ def test_corregir_una_tarea_a_mano(client: TestClient) -> None:
     assert corregida["verified_at"] is not None
 
 
+def _correcciones() -> list[dict]:
+    conn = database.connect()
+    try:
+        return [dict(row) for row in conn.execute("SELECT * FROM correcciones ORDER BY id")]
+    finally:
+        conn.close()
+
+
+def test_un_operador_no_puede_corregir_tareas(client: TestClient, como_operador) -> None:
+    guardado = _guardar(client)
+    tarea = _tareas(client)[("C-1", guardado["id"])]
+
+    response = client.patch(f"/registro/tareas/{tarea['id']}", json={"status": "realizada"})
+
+    assert response.status_code == 403
+    assert _tareas(client)[("C-1", guardado["id"])]["status"] == "pendiente"
+    assert _correcciones() == []
+
+
+def test_cada_correccion_registra_quien_la_hizo(client: TestClient) -> None:
+    guardado = _guardar(client)
+    tarea = _tareas(client)[("C-1", guardado["id"])]
+
+    corregida = client.patch(
+        f"/registro/tareas/{tarea['id']}",
+        json={"status": "realizada", "observation": "Cambio de fuente", "migrated_node": "N-7"},
+    ).json()
+
+    assert corregida["corrected_by"] == "Pruebas"
+    assert corregida["corrected_at"] is not None
+    filas = _correcciones()
+    assert {(f["campo"], f["valor_anterior"], f["valor_nuevo"]) for f in filas} == {
+        ("estado", "pendiente", "realizada"),
+        ("observacion", None, "Cambio de fuente"),
+        ("nodo_migrado", None, "N-7"),
+    }
+    assert {(f["usuario"], f["nombre"], f["parada_id"], f["camara_id"]) for f in filas} == {
+        ("pruebas", "Pruebas", tarea["id"], "C-1"),
+    }
+
+
+def test_una_correccion_sin_cambios_no_queda_registrada(client: TestClient) -> None:
+    guardado = _guardar(client)
+    tarea = _tareas(client)[("C-1", guardado["id"])]
+
+    sin_cambios = client.patch(f"/registro/tareas/{tarea['id']}", json={"status": "pendiente"}).json()
+
+    assert _correcciones() == []
+    assert sin_cambios["corrected_by"] is None and sin_cambios["verified_at"] is None
+
+
+def test_el_historial_de_correcciones_sobrevive_al_borrar_el_plan(client: TestClient) -> None:
+    guardado = _guardar(client)
+    tarea = _tareas(client)[("C-1", guardado["id"])]
+    client.patch(f"/registro/tareas/{tarea['id']}", json={"status": "no_realizada"})
+
+    assert client.delete(f"/registro/planes/{guardado['id']}").status_code == 204
+
+    (fila,) = _correcciones()
+    assert fila["parada_id"] is None
+    assert (fila["camara_id"], fila["plan_id"], fila["usuario"]) == ("C-1", guardado["id"], "pruebas")
+
+
+def _actividad() -> list[tuple]:
+    conn = database.connect()
+    try:
+        return [
+            (row["accion"], row["usuario"], row["plan_id"], row["plan_nombre"])
+            for row in conn.execute("SELECT * FROM actividad ORDER BY id")
+        ]
+    finally:
+        conn.close()
+
+
+def test_queda_registrado_quien_crea_cambia_y_borra_cada_plan(client: TestClient) -> None:
+    guardado = _guardar(client, _plan(name="Semana 1"))
+    plan_id = guardado["id"]
+    assert client.put(f"/registro/planes/{plan_id}", json=_plan(name="Semana 1")).status_code == 200
+    assert client.patch(f"/registro/planes/{plan_id}", json={"name": "Semana uno"}).status_code == 200
+    assert client.delete(f"/registro/planes/{plan_id}").status_code == 204
+
+    assert _actividad() == [
+        ("plan_creado", "pruebas", plan_id, "Semana 1"),
+        ("plan_reemplazado", "pruebas", plan_id, "Semana 1"),
+        ("plan_editado", "pruebas", plan_id, "Semana uno"),
+        ("plan_borrado", "pruebas", plan_id, "Semana uno"),
+    ]
+
+
+def test_un_cambio_rechazado_no_queda_en_la_actividad(client: TestClient) -> None:
+    assert client.delete("/registro/planes/999").status_code == 404
+    assert _actividad() == []
+
+
+def test_queda_registrado_quien_carga_un_seguimiento(client: TestClient) -> None:
+    plan = _plan()
+    guardado = _guardar(client, plan)
+    excel = _completar(_exportar(client, plan, guardado["id"]), {"C-1": {"Realizado": "Sí"}})
+
+    _cargar(client, excel)
+
+    ((accion, usuario, plan_id, _),) = _actividad()[1:]
+    assert (accion, usuario, plan_id) == ("seguimiento_cargado", "pruebas", guardado["id"])
+
+
+def test_una_base_v3_se_migra_al_abrirla(client: TestClient) -> None:
+    """Una base anterior (sin `paradas.plan_id`) se completa sola al abrirla, y
+    lo reprogramado se sigue derivando igual."""
+    primero = _guardar(client, _plan(_jornada("2026-10-01", 1, ["C-1", "C-2"])))
+    segundo = _guardar(client, _plan(_jornada("2026-10-08", 1, ["C-1"])))
+    conn = database.connect()
+    for vista in database._VIEWS:
+        conn.execute(f"DROP VIEW {vista}")
+    conn.execute("DROP INDEX idx_paradas_camara_plan")
+    conn.execute("DROP INDEX idx_paradas_plan")
+    conn.execute("ALTER TABLE paradas DROP COLUMN plan_id")
+    conn.execute("PRAGMA user_version = 3")
+    conn.commit()
+    conn.close()
+    database._initialized.clear()
+
+    estados = _estados(client)
+
+    assert estados[("C-1", primero["id"])] == "reprogramada"
+    assert estados[("C-2", primero["id"])] == "pendiente"
+    assert estados[("C-1", segundo["id"])] == "pendiente"
+    conn = database.connect()
+    try:
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == database.SCHEMA_VERSION
+        assert conn.execute("SELECT COUNT(*) FROM paradas WHERE plan_id IS NULL").fetchone()[0] == 0
+    finally:
+        conn.close()
+
+
 def test_no_se_carga_reprogramada_a_mano(client: TestClient) -> None:
     """Reprogramada se deriva: no es un estado que se pueda informar."""
     _guardar(client)

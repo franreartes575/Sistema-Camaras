@@ -9,7 +9,7 @@
 import { TaskRow } from "@/components/registro/TaskRow";
 import { BUTTON } from "@/components/ui/controls";
 import { IconDownload, IconRoute } from "@/components/ui/icons";
-import type { ReportedStatus, StatusFilter, Task } from "@/lib/registro";
+import type { StatusFilter, Task, TaskChanges } from "@/lib/registro";
 
 export type TaskView = "faltan" | "realizada" | "no_realizada" | "reprogramada" | "todas";
 
@@ -32,7 +32,7 @@ export default function TaskList({
   isPlanning,
   isDownloading,
   onViewChange,
-  onTaskStatus,
+  onTaskUpdate,
   onShowRoute,
   onPlan,
   onDownload,
@@ -44,7 +44,8 @@ export default function TaskList({
   isPlanning: boolean;
   isDownloading: boolean;
   onViewChange: (view: TaskView) => void;
-  onTaskStatus: (task: Task, status: ReportedStatus) => void;
+  /** Sin él (no es administrador), las tareas se ven en sólo lectura. */
+  onTaskUpdate?: (task: Task, changes: TaskChanges) => Promise<boolean>;
   onShowRoute: (task: Task) => void;
   onPlan: () => void;
   onDownload: () => void;
@@ -114,7 +115,7 @@ export default function TaskList({
             key={task.id}
             task={task}
             busy={busyTaskId === task.id}
-            onStatusChange={(status) => onTaskStatus(task, status)}
+            onUpdate={onTaskUpdate && ((changes) => onTaskUpdate(task, changes))}
             onShowRoute={() => onShowRoute(task)}
           />
         ))}
