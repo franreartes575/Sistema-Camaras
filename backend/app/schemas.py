@@ -377,6 +377,15 @@ class Task(BaseModel):
     observation: str | None
     status: TaskStatus
     verified_at: str | None
+    corrected_by: str | None = Field(None, description="Quién la corrigió a mano por última vez")
+    corrected_at: str | None = Field(None, description="Cuándo fue esa última corrección")
+    crew: str | None = Field(None, description="Cuadrilla que la hizo, según el seguimiento")
+    reported_date: dt.date | None = Field(
+        None, description="Día en que se trabajó según el seguimiento"
+    )
+    off_plan: bool = Field(
+        False, description="Se trabajó otro día que el planificado (cambio hecho fuera del programa)"
+    )
 
 
 class RouteDetail(RouteSummary):
@@ -392,6 +401,27 @@ class TaskUpdate(BaseModel):
     status: ReportedStatus | None = None
     observation: str | None = Field(None, max_length=2000)
     migrated_node: str | None = Field(None, max_length=200)
+
+
+class OffPlanTask(BaseModel):
+    """Una tarea que se hizo otro día que el planificado."""
+
+    camera_id: str
+    planned_date: dt.date
+    reported_date: dt.date
+    crew: str | None
+
+
+class CrewTasks(BaseModel):
+    crew: str
+    tasks: int
+
+
+class CrewDay(BaseModel):
+    """Las cuadrillas que trabajaron un día y cuántas tareas hizo cada una."""
+
+    date: dt.date
+    crews: list[CrewTasks]
 
 
 class FollowUpResult(BaseModel):
@@ -413,6 +443,21 @@ class FollowUpResult(BaseModel):
     )
     previously_loaded_at: str | None = Field(
         None, description="Si el mismo archivo ya se había cargado, cuándo"
+    )
+    crew_column: str | None = Field(
+        None, description="Columna de la que se leyó la cuadrilla (None: no se encontró)"
+    )
+    stale: int = Field(
+        0, description="Filas más viejas que lo ya cargado en su tarea: no se aplicaron"
+    )
+    off_plan: int = Field(
+        0, description="Tareas que se trabajaron otro día que el planificado"
+    )
+    off_plan_tasks: list[OffPlanTask] = Field(
+        default_factory=list, description="Esas tareas (hasta 50)"
+    )
+    crews_by_day: list[CrewDay] = Field(
+        default_factory=list, description="Qué cuadrillas trabajaron cada día, según el archivo"
     )
 
 

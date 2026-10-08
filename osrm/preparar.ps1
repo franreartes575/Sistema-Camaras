@@ -24,7 +24,8 @@ param(
 
 $ErrorActionPreference = "Stop"
 $data = Join-Path $PSScriptRoot "data"
-$osrmImage = "ghcr.io/project-osrm/osrm-backend:latest"
+# La misma imagen que docker-compose.yml: el grafo sólo lo lee la versión que lo armó.
+$osrmImage = "ghcr.io/project-osrm/osrm-backend:v26.9.0@sha256:8a1b1bc938412f15f9b5b32d794c4ec6bf4a85dfbbabfa0a014b70b187edb53b"
 
 # Bounding box de la provincia de Salta, con un margen para que las rutas que
 # salen y vuelven a entrar por rutas nacionales sigan siendo navegables.

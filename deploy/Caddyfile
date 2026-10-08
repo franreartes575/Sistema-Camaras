@@ -15,6 +15,23 @@
 #
 # El backend y el frontend escuchan sólo en 127.0.0.1: desde la red se llega
 # únicamente por acá.
+#
+# Límite de pedidos: Caddy no lo trae sin un plugin (caddy-ratelimit). Los
+# límites por IP los aplica el backend (por endpoint y en el login); si el
+# servicio queda expuesto a internet y no a una red interna, usá nginx.conf,
+# que además los aplica antes de llegar a Python.
+
+{
+	servers {
+		# Un cliente que manda los encabezados o el cuerpo de a gotas
+		# (slowloris) no retiene conexiones indefinidamente.
+		timeouts {
+			read_header 10s
+			read_body 30s
+			idle 2m
+		}
+	}
+}
 
 camaras.ejemplo.gob.ar {
 	encode zstd gzip
@@ -30,7 +47,13 @@ camaras.ejemplo.gob.ar {
 		request_body {
 			max_size 33MB
 		}
-		reverse_proxy 127.0.0.1:8000
+		reverse_proxy 127.0.0.1:8000 {
+			# /optimize/ puede tardar minutos con muchas sedes: que el
+			# proxy no lo corte antes que el backend.
+			transport http {
+				response_header_timeout 300s
+			}
+		}
 	}
 
 	handle {

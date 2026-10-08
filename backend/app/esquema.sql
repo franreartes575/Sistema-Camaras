@@ -13,6 +13,8 @@
 --   camaras             catálogo: todas las cámaras, se planifiquen o no
 --   sedes               bases operativas de las que salen las cuadrillas
 --   cargas_catalogo     historial de planillas importadas al catálogo
+--   correcciones        quién corrigió a mano cada tarea, y qué cambió
+--   actividad           quién creó, cambió o borró cada plan y cargó cada seguimiento
 --
 -- El estado guardado de una parada es el que informaron los técnicos
 -- (pendiente / realizada / no_realizada). "Reprogramada" no se guarda: se
@@ -59,6 +61,15 @@ CREATE TABLE IF NOT EXISTS paradas (
     estado          TEXT    NOT NULL DEFAULT 'pendiente'
                     CHECK (estado IN ('pendiente', 'realizada', 'no_realizada')),
     verificado_en   TEXT,                    -- última vez que un seguimiento la tocó
+    -- Copia de recorridos.plan_id, que nunca cambia: con el índice
+    -- (camara_id, plan_id) "¿se volvió a planificar?" es una búsqueda, no
+    -- un recorrido por todas las paradas (ver v_paradas).
+    plan_id         INTEGER,
+    -- Lo que informa el seguimiento: quién la hizo y qué día se trabajó (la
+    -- fecha de cierre, o la programada). Si la fecha no es la de su jornada,
+    -- la tarea se reprogramó por fuera del programa (ver v_paradas).
+    cuadrilla       TEXT,
+    fecha_informada TEXT,                    -- AAAA-MM-DD
     UNIQUE (recorrido_id, orden)
 );
 
@@ -112,12 +123,51 @@ CREATE TABLE IF NOT EXISTS cargas_catalogo (
     descartadas  INTEGER NOT NULL
 );
 
+-- Correcciones manuales de una tarea desde el Registro: quién cambió qué
+-- campo, cuándo, y de qué valor a cuál. Una fila por campo cambiado. Sólo se
+-- agrega (la API no edita ni borra filas). Guarda cámara, plan y fecha por su
+-- cuenta para que el historial no se pierda si después se borra el plan
+-- (`parada_id` queda en NULL).
+CREATE TABLE IF NOT EXISTS correcciones (
+    id             INTEGER PRIMARY KEY AUTOINCREMENT,
+    parada_id      INTEGER REFERENCES paradas (id) ON DELETE SET NULL,
+    plan_id        INTEGER NOT NULL,
+    camara_id      TEXT    NOT NULL,
+    fecha          TEXT    NOT NULL,         -- AAAA-MM-DD de la jornada
+    corregido_en   TEXT    NOT NULL,
+    usuario        TEXT    NOT NULL,         -- usuario con el que inició sesión
+    nombre         TEXT    NOT NULL,         -- su nombre visible en ese momento
+    campo          TEXT    NOT NULL CHECK (campo IN ('estado', 'observacion', 'nodo_migrado')),
+    valor_anterior TEXT,
+    valor_nuevo    TEXT
+);
+
+-- Quién hizo cada cambio sobre los planes: crearlos, reemplazarlos,
+-- renombrarlos, borrarlos y cargarles seguimientos. Sólo se agrega, en la
+-- misma transacción que el cambio. Sin clave foránea a `planes`: guarda el
+-- id y el nombre para que lo borrado siga figurando.
+CREATE TABLE IF NOT EXISTS actividad (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    en          TEXT    NOT NULL,
+    usuario     TEXT    NOT NULL,
+    nombre      TEXT    NOT NULL,
+    accion      TEXT    NOT NULL CHECK (accion IN (
+                    'plan_creado', 'plan_reemplazado', 'plan_editado', 'plan_borrado',
+                    'seguimiento_cargado')),
+    plan_id     INTEGER,
+    plan_nombre TEXT,
+    detalle     TEXT
+);
+
 CREATE INDEX IF NOT EXISTS idx_recorridos_plan  ON recorridos (plan_id);
 CREATE INDEX IF NOT EXISTS idx_recorridos_fecha ON recorridos (fecha);
 CREATE INDEX IF NOT EXISTS idx_paradas_recorrido ON paradas (recorrido_id);
 CREATE INDEX IF NOT EXISTS idx_paradas_camara   ON paradas (camara_id);
+CREATE INDEX IF NOT EXISTS idx_paradas_camara_plan ON paradas (camara_id, plan_id);
+CREATE INDEX IF NOT EXISTS idx_paradas_plan      ON paradas (plan_id, estado);
 CREATE INDEX IF NOT EXISTS idx_cargas_sha256    ON cargas_seguimiento (sha256);
 CREATE INDEX IF NOT EXISTS idx_camaras_localidad ON camaras (localidad);
+CREATE INDEX IF NOT EXISTS idx_correcciones_parada ON correcciones (parada_id);
 
 -- Cada parada con su jornada y su estado efectivo. Una tarea que quedó
 -- pendiente (o no realizada) y cuya cámara aparece en un plan posterior ya no
@@ -132,18 +182,21 @@ SELECT
     r.dia,
     CASE
         WHEN pa.estado <> 'realizada' AND EXISTS (
-            SELECT 1
-            FROM paradas otra
-            JOIN recorridos r2 ON r2.id = otra.recorrido_id
-            WHERE otra.camara_id = pa.camara_id AND r2.plan_id > r.plan_id
+            SELECT 1 FROM paradas otra
+            WHERE otra.camara_id = pa.camara_id AND otra.plan_id > r.plan_id
         ) THEN 'reprogramada'
         ELSE pa.estado
-    END AS estado_actual
+    END AS estado_actual,
+    (pa.fecha_informada IS NOT NULL AND pa.fecha_informada <> r.fecha) AS fuera_de_plan
 FROM paradas pa
 JOIN recorridos r ON r.id = pa.recorrido_id
 JOIN planes pl ON pl.id = r.plan_id;
 
--- Una fila por jornada con el avance de sus tareas.
+-- Una fila por jornada con el avance de sus tareas. Agrega sobre `paradas` y
+-- no sobre v_paradas: un LEFT JOIN a esa vista obliga a SQLite a calcularla
+-- entera (todas las paradas del registro) aunque se pida una sola jornada.
+-- Los EXISTS repiten la regla de "reprogramada" de v_paradas (una búsqueda en
+-- el índice (camara_id, plan_id), sólo para las que no están realizadas).
 CREATE VIEW IF NOT EXISTS v_recorridos AS
 SELECT
     r.id,
@@ -158,17 +211,28 @@ SELECT
     r.distancia_m,
     r.duracion_s,
     r.tramos_sin_conexion,
-    COUNT(v.id)                                      AS total,
-    COALESCE(SUM(v.estado_actual = 'realizada'), 0)    AS realizadas,
-    COALESCE(SUM(v.estado_actual = 'pendiente'), 0)    AS pendientes,
-    COALESCE(SUM(v.estado_actual = 'no_realizada'), 0) AS no_realizadas,
-    COALESCE(SUM(v.estado_actual = 'reprogramada'), 0) AS reprogramadas
+    COUNT(pa.id)                                   AS total,
+    COALESCE(SUM(pa.estado = 'realizada'), 0)      AS realizadas,
+    COALESCE(SUM(pa.estado = 'pendiente' AND NOT EXISTS (
+        SELECT 1 FROM paradas otra
+        WHERE otra.camara_id = pa.camara_id AND otra.plan_id > r.plan_id
+    )), 0)                                         AS pendientes,
+    COALESCE(SUM(pa.estado = 'no_realizada' AND NOT EXISTS (
+        SELECT 1 FROM paradas otra
+        WHERE otra.camara_id = pa.camara_id AND otra.plan_id > r.plan_id
+    )), 0)                                         AS no_realizadas,
+    COALESCE(SUM(pa.estado <> 'realizada' AND EXISTS (
+        SELECT 1 FROM paradas otra
+        WHERE otra.camara_id = pa.camara_id AND otra.plan_id > r.plan_id
+    )), 0)                                         AS reprogramadas
 FROM recorridos r
 JOIN planes pl ON pl.id = r.plan_id
-LEFT JOIN v_paradas v ON v.recorrido_id = r.id
+LEFT JOIN paradas pa ON pa.recorrido_id = r.id
 GROUP BY r.id;
 
--- Una fila por plan con el avance acumulado de todas sus jornadas.
+-- Una fila por plan con el avance acumulado de todas sus jornadas. Con
+-- subconsultas por plan (índices por plan_id) y no agregando v_recorridos:
+-- así pedir un plan calcula sólo ese, no todos.
 CREATE VIEW IF NOT EXISTS v_planes AS
 SELECT
     pl.id,
@@ -178,16 +242,24 @@ SELECT
     pl.motor,
     pl.por_calle,
     pl.notas,
-    COUNT(vr.id)                         AS recorridos,
-    MIN(vr.fecha)                        AS fecha_desde,
-    MAX(vr.fecha)                        AS fecha_hasta,
-    COALESCE(SUM(vr.distancia_m), 0)     AS distancia_m,
-    COALESCE(SUM(vr.duracion_s), 0)      AS duracion_s,
-    COALESCE(SUM(vr.total), 0)           AS total,
-    COALESCE(SUM(vr.realizadas), 0)      AS realizadas,
-    COALESCE(SUM(vr.pendientes), 0)      AS pendientes,
-    COALESCE(SUM(vr.no_realizadas), 0)   AS no_realizadas,
-    COALESCE(SUM(vr.reprogramadas), 0)   AS reprogramadas
-FROM planes pl
-LEFT JOIN v_recorridos vr ON vr.plan_id = pl.id
-GROUP BY pl.id;
+    (SELECT COUNT(*) FROM recorridos r WHERE r.plan_id = pl.id)      AS recorridos,
+    (SELECT MIN(r.fecha) FROM recorridos r WHERE r.plan_id = pl.id)  AS fecha_desde,
+    (SELECT MAX(r.fecha) FROM recorridos r WHERE r.plan_id = pl.id)  AS fecha_hasta,
+    (SELECT COALESCE(SUM(r.distancia_m), 0) FROM recorridos r WHERE r.plan_id = pl.id) AS distancia_m,
+    (SELECT COALESCE(SUM(r.duracion_s), 0) FROM recorridos r WHERE r.plan_id = pl.id)  AS duracion_s,
+    (SELECT COUNT(*) FROM paradas pa WHERE pa.plan_id = pl.id)       AS total,
+    (SELECT COUNT(*) FROM paradas pa
+     WHERE pa.plan_id = pl.id AND pa.estado = 'realizada')           AS realizadas,
+    (SELECT COUNT(*) FROM paradas pa
+     WHERE pa.plan_id = pl.id AND pa.estado = 'pendiente' AND NOT EXISTS (
+         SELECT 1 FROM paradas otra
+         WHERE otra.camara_id = pa.camara_id AND otra.plan_id > pl.id))  AS pendientes,
+    (SELECT COUNT(*) FROM paradas pa
+     WHERE pa.plan_id = pl.id AND pa.estado = 'no_realizada' AND NOT EXISTS (
+         SELECT 1 FROM paradas otra
+         WHERE otra.camara_id = pa.camara_id AND otra.plan_id > pl.id))  AS no_realizadas,
+    (SELECT COUNT(*) FROM paradas pa
+     WHERE pa.plan_id = pl.id AND pa.estado <> 'realizada' AND EXISTS (
+         SELECT 1 FROM paradas otra
+         WHERE otra.camara_id = pa.camara_id AND otra.plan_id > pl.id))  AS reprogramadas
+FROM planes pl;

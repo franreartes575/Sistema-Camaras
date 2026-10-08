@@ -716,6 +716,7 @@ function Aplicacion() {
         <div className={`${section === "registro" ? "flex" : "hidden"} min-h-0 flex-1`}>
           <RegistroView
             refreshKey={registroVersion}
+            canEditTasks={isAdmin}
             mobileView={mobileView}
             onShowMap={() => {
               if (window.matchMedia("(max-width: 767px)").matches) setMobileView("map");

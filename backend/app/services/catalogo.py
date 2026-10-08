@@ -13,7 +13,8 @@ import datetime as dt
 import hashlib
 import math
 import sqlite3
-from collections import defaultdict
+from collections import OrderedDict, defaultdict
+from threading import Lock
 
 import numpy as np
 import pandas as pd
@@ -62,28 +63,26 @@ _CAMERA_COLUMNS = """
     c.localidad_manual AS locality_manual, c.descripcion AS label,
     c.nodo AS node, c.observacion AS observation,
     c.creada_en AS created_at, c.actualizada_en AS updated_at,
-    COALESCE(v.realizadas, 0) AS visits, v.ultima_visita AS last_visit,
-    u.estado AS last_status, u.fecha AS last_planned
+    (SELECT COUNT(*) FROM paradas pa
+     WHERE pa.camara_id = c.id AND pa.estado = 'realizada') AS visits,
+    (SELECT MAX(r.fecha) FROM paradas pa JOIN recorridos r ON r.id = pa.recorrido_id
+     WHERE pa.camara_id = c.id AND pa.estado = 'realizada') AS last_visit,
+    u.estado AS last_status, ur.fecha AS last_planned
 """
 
 # Lo que dice el registro de cada cámara: cuántas veces se hizo, cuándo fue la
-# última, y el estado de su tarea más reciente (la del plan más nuevo).
+# última, y el estado de su tarea más reciente (la del plan más nuevo). Todo
+# por subconsultas sobre el índice (camara_id, plan_id): pedir una cámara
+# mira sólo sus paradas, no numera las de todo el registro.
 _CAMERA_FROM = """
     FROM camaras c
-    LEFT JOIN (
-        SELECT pa.camara_id, COUNT(*) AS realizadas, MAX(r.fecha) AS ultima_visita
-        FROM paradas pa JOIN recorridos r ON r.id = pa.recorrido_id
-        WHERE pa.estado = 'realizada'
-        GROUP BY pa.camara_id
-    ) v ON v.camara_id = c.id
-    LEFT JOIN (
-        SELECT pa.camara_id, pa.estado, r.fecha,
-               ROW_NUMBER() OVER (
-                   PARTITION BY pa.camara_id
-                   ORDER BY r.plan_id DESC, r.fecha DESC, pa.id DESC
-               ) AS n
-        FROM paradas pa JOIN recorridos r ON r.id = pa.recorrido_id
-    ) u ON u.camara_id = c.id AND u.n = 1
+    LEFT JOIN paradas u ON u.id = (
+        SELECT pa.id FROM paradas pa JOIN recorridos r ON r.id = pa.recorrido_id
+        WHERE pa.camara_id = c.id
+        ORDER BY pa.plan_id DESC, r.fecha DESC, pa.id DESC
+        LIMIT 1
+    )
+    LEFT JOIN recorridos ur ON ur.id = u.recorrido_id
 """
 
 
@@ -158,8 +157,13 @@ def import_points(conn: sqlite3.Connection, ingested: Ingested) -> CatalogImport
 
     Agrega las cámaras nuevas y actualiza las que cambiaron. Nunca borra: una
     cámara que no viene en la planilla queda como estaba. Una celda vacía
-    tampoco pisa lo que ya había (descripción, nodo, observación). Al final
-    recalcula las localidades de todo el catálogo.
+    tampoco pisa lo que ya había (descripción, nodo, observación).
+
+    La localidad se calcula sólo para las nuevas, las que se movieron y las
+    que habían quedado "Sin calcular" (salvo las corregidas a mano), y antes
+    de abrir la transacción: ubicar miles de puntos tarda segundos y no debe
+    retener el lock de escritura. Si cambian los límites de los municipios,
+    `catalogo_cli preparar-municipios` recalcula todo el catálogo.
     """
     incoming: dict[str, dict] = {}
     for record in ingested.points.to_dict("records"):
@@ -175,59 +179,83 @@ def import_points(conn: sqlite3.Connection, ingested: Ingested) -> CatalogImport
     existing = {
         row["id"]: dict(row)
         for row in conn.execute(
-            "SELECT id, lat, lon, descripcion, nodo, observacion FROM camaras"
+            "SELECT id, lat, lon, descripcion, nodo, observacion, localidad, localidad_manual"
+            " FROM camaras"
         ).fetchall()
     }
     digest = hashlib.sha256(ingested.raw).hexdigest()
     now = _now()
-    added = updated = unchanged = 0
     limites = localidades.cargar()
+
+    # Todo el cálculo, fuera de la transacción.
+    inserts: list[tuple] = []
+    updates: list[tuple] = []
+    unchanged = 0
+    for camera_id, new in incoming.items():
+        old = existing.get(camera_id)
+        if old is None:
+            inserts.append((
+                camera_id, new["lat"], new["lon"],
+                localidades.localidad_de(new["lat"], new["lon"], limites),
+                new["descripcion"], new["nodo"], new["observacion"], now, now,
+            ))
+            continue
+        merged = {
+            key: new[key] if new[key] is not None else old[key]
+            for key in ("lat", "lon", "descripcion", "nodo", "observacion")
+        }
+        if all(merged[key] == old[key] for key in merged):
+            unchanged += 1
+            continue
+        moved = (merged["lat"], merged["lon"]) != (old["lat"], old["lon"])
+        stale = moved or old["localidad"] == localidades.SIN_CALCULAR
+        locality = (
+            localidades.localidad_de(merged["lat"], merged["lon"], limites)
+            if stale and not old["localidad_manual"]
+            else old["localidad"]
+        )
+        updates.append((
+            merged["lat"], merged["lon"], merged["descripcion"], merged["nodo"],
+            merged["observacion"], locality, now, camera_id,
+        ))
+    # Las que se importaron cuando todavía no estaban los límites (las que se
+    # actualizan ya la recalcularon arriba, con sus coordenadas nuevas).
+    pending = []
+    if limites is not None:
+        updated_ids = {row[-1] for row in updates}
+        pending = [
+            (limites.localidad_de(old["lat"], old["lon"]), camera_id)
+            for camera_id, old in existing.items()
+            if old["localidad"] == localidades.SIN_CALCULAR
+            and not old["localidad_manual"]
+            and camera_id not in updated_ids
+        ]
 
     with conn:
         previous = conn.execute(
             "SELECT cargado_en FROM cargas_catalogo WHERE sha256 = ? ORDER BY id DESC LIMIT 1",
             (digest,),
         ).fetchone()
-        for camera_id, new in incoming.items():
-            old = existing.get(camera_id)
-            if old is None:
-                conn.execute(
-                    """
-                    INSERT INTO camaras (
-                        id, lat, lon, localidad, descripcion, nodo, observacion,
-                        creada_en, actualizada_en
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-                    """,
-                    (
-                        camera_id, new["lat"], new["lon"],
-                        localidades.localidad_de(new["lat"], new["lon"], limites),
-                        new["descripcion"], new["nodo"], new["observacion"], now, now,
-                    ),
-                )
-                added += 1
-                continue
-            merged = {
-                key: new[key] if new[key] is not None else old[key]
-                for key in ("lat", "lon", "descripcion", "nodo", "observacion")
-            }
-            if all(merged[key] == old[key] for key in merged):
-                unchanged += 1
-                continue
-            conn.execute(
-                """
-                UPDATE camaras
-                SET lat = ?, lon = ?, descripcion = ?, nodo = ?, observacion = ?,
-                    actualizada_en = ?
-                WHERE id = ?
-                """,
-                (
-                    merged["lat"], merged["lon"], merged["descripcion"], merged["nodo"],
-                    merged["observacion"], now, camera_id,
-                ),
-            )
-            updated += 1
-
-        recalcular_localidades(conn, limites)
+        conn.executemany(
+            """
+            INSERT INTO camaras (
+                id, lat, lon, localidad, descripcion, nodo, observacion,
+                creada_en, actualizada_en
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            inserts,
+        )
+        conn.executemany(
+            """
+            UPDATE camaras
+            SET lat = ?, lon = ?, descripcion = ?, nodo = ?, observacion = ?,
+                localidad = ?, actualizada_en = ?
+            WHERE id = ?
+            """,
+            updates,
+        )
+        conn.executemany("UPDATE camaras SET localidad = ? WHERE id = ?", pending)
+        added, updated = len(inserts), len(updates)
         cursor = conn.execute(
             """
             INSERT INTO cargas_catalogo (
@@ -323,6 +351,29 @@ def assign_colors(clusters: list[dict], palette_size: int) -> list[int]:
     return [int(color or 0) for color in colors]
 
 
+# Resultados de `cluster_catalog`, por huella de lo que usa (cámaras, sedes y
+# parámetros). El Inicio los pide cada vez que se abre y DBSCAN sobre miles
+# de cámaras tarda; con la huella del contenido, cualquier alta, baja o
+# movimiento invalida sola, sin depender de marcas de tiempo.
+_CLUSTERS_CACHE_SIZE = 16
+_clusters_cache: OrderedDict[str, CatalogClusters] = OrderedDict()
+_clusters_lock = Lock()
+
+
+def limpiar_cache_clusters() -> None:
+    with _clusters_lock:
+        _clusters_cache.clear()
+
+
+def _fingerprint(rows: list[sqlite3.Row], depots: list[Depot], params: tuple) -> str:
+    digest = hashlib.sha256(repr(params).encode())
+    for row in rows:
+        digest.update(f"{row['id']}\x1f{row['lat']!r}\x1f{row['lon']!r}\x1e".encode())
+    for depot in depots:
+        digest.update(f"sede\x1f{depot.name}\x1f{depot.lat!r}\x1f{depot.lon!r}\x1e".encode())
+    return digest.hexdigest()
+
+
 def cluster_catalog(
     conn: sqlite3.Connection,
     eps_km: float,
@@ -334,16 +385,44 @@ def cluster_catalog(
 ) -> CatalogClusters:
     """Agrupa todo el catálogo como el planificador: por zona de sede (con las
     sedes guardadas) y, lo que queda lejos de toda sede, por cercanía."""
+    rows = conn.execute("SELECT id, lat, lon FROM camaras ORDER BY id").fetchall()
+    depots = list_depots(conn) if by_depot else []
+    key = _fingerprint(
+        rows, depots,
+        (eps_km, min_samples, noise_reassign_factor, palette_size, by_depot, depot_max_km),
+    )
+    with _clusters_lock:
+        if key in _clusters_cache:
+            _clusters_cache.move_to_end(key)
+            return _clusters_cache[key]
+    result = _cluster_catalog(
+        rows, depots, eps_km, min_samples, noise_reassign_factor, palette_size, by_depot, depot_max_km
+    )
+    with _clusters_lock:
+        _clusters_cache[key] = result
+        while len(_clusters_cache) > _CLUSTERS_CACHE_SIZE:
+            _clusters_cache.popitem(last=False)
+    return result
+
+
+def _cluster_catalog(
+    rows: list[sqlite3.Row],
+    depots: list[Depot],
+    eps_km: float,
+    min_samples: int,
+    noise_reassign_factor: float,
+    palette_size: int,
+    by_depot: bool,
+    depot_max_km: float,
+) -> CatalogClusters:
     empty = CatalogClusters(
         eps_km=eps_km, by_depot=by_depot, depot_max_km=depot_max_km,
         cameras=[], clusters=[], noise_count=0,
     )
-    rows = conn.execute("SELECT id, lat, lon FROM camaras ORDER BY id").fetchall()
     if not rows:
         return empty
 
     points = pd.DataFrame([dict(row) for row in rows])
-    depots = list_depots(conn) if by_depot else []
     if depots:
         labels, clusters, _ = cluster_by_depot(
             points, [(depot.lat, depot.lon) for depot in depots], depot_max_km,

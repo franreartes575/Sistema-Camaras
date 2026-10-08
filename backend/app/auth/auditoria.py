@@ -8,6 +8,7 @@ dice en qué fila se rompió.
 
 import csv
 import datetime as dt
+import hmac
 import json
 import re
 import sqlite3
@@ -109,6 +110,21 @@ def contar_fallos(
     ).fetchone()[0]
 
 
+def ip_conocida(conn: sqlite3.Connection, usuario_id: int, ip: str | None, desde: dt.datetime) -> bool:
+    """¿Abrió sesión este usuario desde esta IP (en la ventana)? Sólo cuenta un
+    ingreso completo: un fallo desde una IP no la vuelve conocida."""
+    if not ip:
+        return False
+    return conn.execute(
+        """
+        SELECT 1 FROM auditoria_accesos
+        WHERE ip = ? AND ts >= ? AND usuario_id = ? AND evento = 'sesion_iniciada'
+        LIMIT 1
+        """,
+        (ip, reloj.iso(desde), usuario_id),
+    ).fetchone() is not None
+
+
 @dataclass(frozen=True)
 class Verificacion:
     integra: bool
@@ -126,6 +142,45 @@ def verificar_cadena(conn: sqlite3.Connection) -> Verificacion:
             return Verificacion(False, filas, fila["id"])
         anterior = fila["hash"]
     return Verificacion(True, filas, None)
+
+
+@dataclass(frozen=True)
+class Ancla:
+    """La última fila de la auditoría, para guardar FUERA del servidor.
+
+    La cadena prueba que nada de lo que está se alteró, pero no ve que falten
+    las últimas filas: quien tenga el archivo puede borrarlas y lo que queda
+    sigue cerrando. Un ancla anotada afuera (id y hash) lo delata: si esa
+    fila ya no está o cambió su hash, se borró o se rehízo la cola.
+    """
+
+    id: int
+    hash: str
+    ts: str
+
+    @property
+    def texto(self) -> str:
+        return f"{self.id}:{self.hash}"
+
+
+def ancla_actual(conn: sqlite3.Connection) -> Ancla | None:
+    fila = conn.execute("SELECT id, hash, ts FROM auditoria_accesos ORDER BY id DESC LIMIT 1").fetchone()
+    return Ancla(fila["id"], fila["hash"], fila["ts"]) if fila else None
+
+
+def leer_ancla(texto: str) -> tuple[int, str]:
+    """`"id:hash"` → (id, hash). ValueError si no tiene esa forma."""
+    ident, _, firma = texto.strip().partition(":")
+    if not ident.isdigit() or len(firma) != 64:
+        raise ValueError(f"Ancla con formato inválido: {texto.strip()!r} (se espera id:hash).")
+    return int(ident), firma
+
+
+def ancla_presente(conn: sqlite3.Connection, ident: int, firma: str) -> bool:
+    """¿Sigue estando esa fila con ese hash? Junto con una cadena íntegra,
+    prueba que hasta ahí no se borró ni se rehízo nada."""
+    fila = conn.execute("SELECT hash FROM auditoria_accesos WHERE id = ?", (ident,)).fetchone()
+    return fila is not None and hmac.compare_digest(fila["hash"], firma)
 
 
 def listar(

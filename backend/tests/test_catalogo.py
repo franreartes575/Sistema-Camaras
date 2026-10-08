@@ -131,8 +131,42 @@ def test_sin_limites_queda_sin_calcular_y_se_recalcula_al_tenerlos(client) -> No
     assert {c["locality"] for c in _camaras(client).values()} == {localidades.SIN_CALCULAR}
 
     escribir(config.MUNICIPIOS_PATH)
-    _importar(client, [_fila("C-9", -24.75, -65.45)])  # cualquier importación recalcula todo
-    assert _camaras(client)["C-3"]["locality"] == "Cerrillos"
+    # Cualquier importación completa las que quedaron sin calcular: las que no
+    # vienen (C-3) y las que vienen igual (C-2) o cambian sólo el texto (C-1).
+    _importar(client, [_fila("C-9", -24.75, -65.45), BASE[1], {**BASE[0], "Dirección": "Otra"}])
+    camaras = _camaras(client)
+    assert {c: camaras[c]["locality"] for c in ("C-1", "C-2", "C-3", "C-9")} == {
+        "C-1": "Salta", "C-2": "Enclave", "C-3": "Cerrillos", "C-9": "Salta",
+    }
+
+
+def test_importar_calcula_la_localidad_solo_de_lo_nuevo_o_movido(client, municipios, monkeypatch) -> None:
+    """Con miles de cámaras, ubicar todas en cada importación tardaba segundos
+    dentro de la transacción. Sólo cambian de municipio las nuevas y las que
+    se movieron (y las que quedaron sin calcular)."""
+    _importar(client, BASE)
+    calculadas: list[tuple[float, float]] = []
+    original = localidades.Limites.localidad_de
+
+    def contando(self, lat, lon):
+        calculadas.append((lat, lon))
+        return original(self, lat, lon)
+
+    monkeypatch.setattr(localidades.Limites, "localidad_de", contando)
+
+    _importar(
+        client,
+        [
+            _fila("C-1", -24.76, -65.45),  # se movió
+            _fila("C-2", -24.80, -65.40, "Enclave 5"),  # igual
+            _fila("C-3", -24.95, -65.40, "Otra dirección"),  # cambió sólo el texto
+            _fila("C-4", -22.50, -63.80),  # nueva
+        ],
+        nombre="segunda.xlsx",
+    )
+
+    assert sorted(calculadas) == sorted([(-24.76, -65.45), (-22.50, -63.80)])
+    assert _camaras(client)["C-4"]["locality"] == "Islas"
 
 
 def test_la_localidad_corregida_a_mano_no_la_pisa_una_importacion(client, municipios) -> None:
@@ -386,6 +420,29 @@ def test_una_camara_suelta_cercana_se_suma_al_cluster_por_defecto(client) -> Non
     suelta = {c["id"]: c["cluster"] for c in estricto["cameras"]}
     assert asignada["Cerca"] == asignada["A-0"] != -1
     assert suelta["Cerca"] == -1
+
+
+def test_clusters_se_reutilizan_mientras_no_cambie_el_catalogo(client, monkeypatch) -> None:
+    """El Inicio los pide cada vez que se abre: DBSCAN sobre miles de cámaras
+    tarda, y el resultado sólo depende de las cámaras, las sedes y los
+    parámetros."""
+    catalogo.limpiar_cache_clusters()
+    corridas = []
+    original = catalogo.run_dbscan
+    monkeypatch.setattr(catalogo, "run_dbscan", lambda *a, **k: corridas.append(1) or original(*a, **k))
+    _importar(client, BASE)
+    parametros = {"eps_km": 5, "por_sede": False}
+
+    primero = client.get("/catalogo/clusters", params=parametros).json()
+    segundo = client.get("/catalogo/clusters", params=parametros).json()
+    otro_radio = client.get("/catalogo/clusters", params={**parametros, "eps_km": 6}).json()
+    _importar(client, [_fila("C-1", -24.70, -65.45)], nombre="mueve.xlsx")  # se movió
+    movido = client.get("/catalogo/clusters", params=parametros).json()
+
+    assert primero == segundo
+    assert otro_radio["eps_km"] == 6
+    assert len(corridas) == 3  # primero, otro radio y después de mover una cámara
+    assert movido["cameras"]
 
 
 def test_clusters_con_el_catalogo_vacio(client) -> None:

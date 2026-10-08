@@ -231,6 +231,64 @@ def test_cada_bloqueo_dura_el_doble_y_despues_es_permanente(ahora) -> None:
     assert login(cliente()).status_code == 200
 
 
+CASA = "198.51.100.10"  # IP desde la que el usuario ya entró antes
+ATACANTE = "203.0.113.66"
+
+
+def _bloquear_para_siempre(ahora) -> None:
+    """Un atacante desde otra IP agota los bloqueos temporales y el permanente."""
+    for minutos in (15, 30, 60):
+        _fallar(5, c=cliente(ip=ATACANTE))
+        ahora.avanzar(minutes=minutos + 1)
+    _fallar(5, c=cliente(ip=ATACANTE))
+    assert usuario_db()["bloqueado_permanente"] == 1
+
+
+def test_un_atacante_no_deja_afuera_al_usuario_en_una_ip_conocida(ahora) -> None:
+    """El bloqueo por fallos frena a quien prueba contraseñas, no al dueño de
+    la cuenta desde donde ya entró: si no, cualquiera que sepa el nombre de
+    usuario podría dejar sin acceso al único administrador."""
+    crear_usuario()
+    entrar(cliente(ip=CASA))
+
+    _bloquear_para_siempre(ahora)
+
+    assert login(cliente(ip=CASA)).status_code == 200
+    assert login(cliente(ip="192.0.2.77")).status_code == 401  # IP nueva: sigue bloqueada
+    assert login(cliente(ip=ATACANTE)).status_code in (401, 429)
+
+
+def test_una_ip_conocida_vence(ahora) -> None:
+    crear_usuario()
+    entrar(cliente(ip=CASA))
+    ahora.avanzar(days=config.LOCKOUT_KNOWN_IP_DAYS + 1)
+
+    _fallar(5, c=cliente(ip=ATACANTE))
+
+    assert login(cliente(ip=CASA)).status_code == 401
+
+
+def test_el_limite_por_usuario_no_corta_desde_una_ip_conocida(ahora, monkeypatch) -> None:
+    monkeypatch.setattr(config, "LOGIN_MAX_FAILURES_PER_USER", 3)
+    crear_usuario()
+    entrar(cliente(ip=CASA))
+    _fallar(3, c=cliente(ip=ATACANTE))
+
+    assert login(cliente(ip=CASA)).status_code == 200
+    assert login(cliente(ip="192.0.2.77")).status_code == 429
+
+
+def test_un_bloqueo_temporal_no_cierra_las_sesiones_abiertas(ahora) -> None:
+    crear_usuario()
+    c = cliente(ip=CASA)
+    entrar(c)
+
+    _fallar(5, c=cliente(ip=ATACANTE))
+
+    assert usuario_db()["bloqueado_hasta"] is not None
+    assert c.get("/auth/sesion").status_code == 200
+
+
 def test_un_ingreso_completo_reinicia_los_contadores(ahora) -> None:
     crear_usuario()
     _fallar(4)
@@ -375,6 +433,32 @@ def test_la_inactividad_cierra_la_sesion(ahora) -> None:
     assert respuesta.status_code == 401
     assert "Max-Age=0" in set_cookies(respuesta)[COOKIE_SESION]
     assert eventos(evento="sesion_expirada")[0]["motivo"] == "inactividad"
+
+
+def _ultima_actividad() -> str:
+    conn = db.connect()
+    try:
+        return conn.execute("SELECT ultima_actividad FROM sesiones").fetchone()[0]
+    finally:
+        conn.close()
+
+
+def test_pedidos_seguidos_no_escriben_la_actividad_cada_vez(ahora) -> None:
+    """Cada escritura es un commit a disco: con pedidos a segundos uno del
+    otro (el Inicio dispara varios juntos) alcanza con marcarla cada tanto."""
+    crear_usuario()
+    c = cliente()
+    entrar(c)
+    al_entrar = _ultima_actividad()
+
+    ahora.avanzar(seconds=config.SESSION_TOUCH_S - 1)
+    assert c.get("/auth/sesion").status_code == 200
+    sin_tocar = _ultima_actividad()
+    ahora.avanzar(seconds=2)
+    assert c.get("/auth/sesion").status_code == 200
+
+    assert sin_tocar == al_entrar
+    assert _ultima_actividad() > al_entrar
 
 
 def test_la_actividad_mantiene_la_sesion_hasta_el_vencimiento_absoluto(ahora) -> None:
@@ -790,6 +874,61 @@ def test_consola_verifica_y_exporta_la_auditoria(ahora, monkeypatch, capsys, tmp
     assert "2 eventos exportados" in exportado  # --hasta incluye todo el día
     assert salida.value.code == 2
     assert "ALTERADA" in capsys.readouterr().out
+
+
+def _ancla(salida: str) -> str:
+    """El "id:hash" que imprime `anclar-auditoria`."""
+    return next(palabra for palabra in salida.split() if palabra.count(":") == 1 and len(palabra) > 60)
+
+
+def test_un_ancla_detecta_que_borraron_los_ultimos_eventos(ahora, monkeypatch, capsys) -> None:
+    """Borrar las últimas filas deja una cadena que cierra: sólo un ancla
+    guardada afuera (id y hash de la última fila) lo delata."""
+    from app.auth import cli
+
+    for _ in range(3):
+        login(cliente(), "x", "y")
+    ancla = _ancla(_consola(monkeypatch, capsys, "anclar-auditoria"))
+    conn = db.connect()
+    conn.execute("DROP TRIGGER auditoria_sin_borrar")
+    conn.execute("DELETE FROM auditoria_accesos WHERE id = (SELECT MAX(id) FROM auditoria_accesos)")
+    conn.close()
+
+    sin_ancla = _consola(monkeypatch, capsys, "verificar-auditoria")
+    with pytest.raises(SystemExit) as salida:
+        cli.main(["verificar-auditoria", "--ancla", ancla])
+
+    assert "íntegra" in sin_ancla  # la cadena sola no lo ve
+    assert salida.value.code == 2
+    assert f"id={ancla.split(':')[0]}" in capsys.readouterr().out
+
+
+def test_las_anclas_se_guardan_en_un_archivo_y_se_verifican_desde_ahi(
+    ahora, monkeypatch, capsys, tmp_path
+) -> None:
+    archivo = tmp_path / "otro-equipo" / "anclas.txt"
+    login(cliente(), "x", "y")
+    _consola(monkeypatch, capsys, "anclar-auditoria", "--archivo", str(archivo))
+    login(cliente(), "z", "y")
+    _consola(monkeypatch, capsys, "anclar-auditoria", "--archivo", str(archivo))
+
+    salida = _consola(monkeypatch, capsys, "verificar-auditoria", "--anclas-archivo", str(archivo))
+
+    assert len(archivo.read_text(encoding="utf-8").splitlines()) == 2
+    assert "íntegra" in salida and "2 ancla(s)" in salida
+
+
+def test_un_ancla_con_otro_hash_no_pasa(ahora, monkeypatch, capsys) -> None:
+    from app.auth import cli
+
+    login(cliente(), "x", "y")
+    ancla = _ancla(_consola(monkeypatch, capsys, "anclar-auditoria"))
+    falsa = ancla.split(":")[0] + ":" + "0" * 64
+
+    with pytest.raises(SystemExit) as salida:
+        cli.main(["verificar-auditoria", "--ancla", falsa])
+
+    assert salida.value.code == 2
 
 
 def test_consola_informa_errores_sin_traza(ahora, monkeypatch, capsys) -> None:
