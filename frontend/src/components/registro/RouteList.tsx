@@ -5,10 +5,13 @@
  * marca para verla en el mapa; al tocarla se enfoca y despliega sus paradas.
  */
 
+import { useState } from "react";
+
+import RouteDateEditor from "@/components/registro/RouteDateEditor";
 import { StackedBar } from "@/components/registro/Summary";
 import { StatusIcon } from "@/components/registro/StatusBadge";
 import { StopRow } from "@/components/registro/TaskRow";
-import { IconCalendar, IconChevron } from "@/components/ui/icons";
+import { IconCalendar, IconChevron, IconPencil } from "@/components/ui/icons";
 import { formatDistance, formatDuration, formatLongDay } from "@/lib/format";
 import { shiftIso } from "@/lib/planDates";
 import {
@@ -81,6 +84,8 @@ function RouteCard({
   onToggle,
   onFocus,
   onTaskUpdate,
+  onRouteDate,
+  isRouteBusy = false,
 }: {
   route: RouteSummary;
   today: string;
@@ -93,7 +98,11 @@ function RouteCard({
   onFocus: () => void;
   /** Sin él (no es administrador), las tareas se ven en sólo lectura. */
   onTaskUpdate?: (task: Task, changes: TaskChanges) => Promise<boolean>;
+  /** Sin él (no es administrador), la fecha del día no se edita. */
+  onRouteDate?: (date: string) => Promise<boolean>;
+  isRouteBusy?: boolean;
 }) {
+  const [isEditingDate, setIsEditingDate] = useState(false);
   return (
     <li
       className={`overflow-hidden rounded-lg border transition ${
@@ -143,6 +152,26 @@ function RouteCard({
             </span>
           </span>
         </button>
+        {onRouteDate && (
+          <button
+            type="button"
+            onClick={() => setIsEditingDate(true)}
+            disabled={isRouteBusy}
+            aria-label={`Cambiar la fecha del día ${route.day} (${route.date})`}
+            title="Cambiar la fecha del día"
+            className="shrink-0 rounded-md p-1 text-slate-400 transition hover:bg-slate-800 hover:text-slate-100 disabled:opacity-50"
+          >
+            <IconPencil className="h-3.5 w-3.5" />
+          </button>
+        )}
+        {isEditingDate && onRouteDate && (
+          <RouteDateEditor
+            route={route}
+            busy={isRouteBusy}
+            onSave={onRouteDate}
+            onClose={() => setIsEditingDate(false)}
+          />
+        )}
       </div>
       {isExpanded && (
         <div className="border-t border-slate-700/60 bg-slate-950/40 px-3 py-1.5">
@@ -181,6 +210,8 @@ export default function RouteList({
   onSetMany,
   onFocus,
   onTaskUpdate,
+  onRouteDate,
+  busyRouteId = null,
 }: {
   routes: RouteSummary[];
   today: string;
@@ -197,6 +228,9 @@ export default function RouteList({
   onFocus: (id: number) => void;
   /** Sin él (no es administrador), las tareas se ven en sólo lectura. */
   onTaskUpdate?: (task: Task, changes: TaskChanges) => Promise<boolean>;
+  /** Cambia la fecha planificada de una jornada; sin él, no se edita. */
+  onRouteDate?: (route: RouteSummary, date: string) => Promise<boolean>;
+  busyRouteId?: number | null;
 }) {
   const groups: { date: string; routes: RouteSummary[] }[] = [];
   for (const route of routes) {
@@ -286,6 +320,8 @@ export default function RouteList({
                   onToggle={() => onToggle(route.id)}
                   onFocus={() => onFocus(route.id)}
                   onTaskUpdate={onTaskUpdate}
+                  onRouteDate={onRouteDate && ((date) => onRouteDate(route, date))}
+                  isRouteBusy={busyRouteId === route.id}
                 />
               ))}
             </ul>

@@ -4,6 +4,8 @@ import dynamic from "next/dynamic";
 import { useCallback, useEffect, useMemo, useState } from "react";
 
 import AuthGate, { useAuth } from "@/components/auth/AuthGate";
+import PanelResizer from "@/components/ui/PanelResizer";
+import { RESIZABLE_PANEL, useResizablePanel } from "@/lib/usePanelWidth";
 import ControlPanel, { type RegistroSync } from "@/components/ControlPanel";
 import InicioView from "@/components/inicio/InicioView";
 import type { InputMode } from "@/components/panel/FileStep";
@@ -186,6 +188,7 @@ export default function Home() {
 function Aplicacion() {
   const { session } = useAuth();
   const isAdmin = session.usuario.rol === "admin";
+  const planPanel = useResizablePanel("planificar", 400);
   const [file, setFile] = useState<File | null>(null);
   const [fileOrigin, setFileOrigin] = useState<FileOrigin | null>(null);
   const [upload, setUpload] = useState<UploadExcelResponse | null>(null);
@@ -637,7 +640,8 @@ function Aplicacion() {
 
       <div className={`${section === "plan" ? "flex" : "hidden"} min-h-0 flex-1`}>
         <aside
-          className={`${mobileView === "panel" ? "block" : "hidden"} w-full overflow-y-auto border-slate-800 md:block md:w-[23rem] md:shrink-0 md:border-r lg:w-[25rem]`}
+          style={planPanel.panelStyle}
+          className={`${mobileView === "panel" ? "block" : "hidden"} w-full overflow-y-auto border-slate-800 md:block md:border-r ${RESIZABLE_PANEL}`}
         >
           <div className="px-4 py-5 md:px-5">
             <ControlPanel
@@ -693,10 +697,11 @@ function Aplicacion() {
             />
           </div>
         </aside>
+        <PanelResizer label="el panel de Planificar" {...planPanel.resizer} />
 
         <section
           aria-label="Mapa de recorridos"
-          className={`${mobileView === "map" ? "block" : "hidden"} relative min-h-0 flex-1 md:block`}
+          className={`${mobileView === "map" ? "block" : "hidden"} relative min-h-0 min-w-0 flex-1 md:block`}
         >
           <MapView
             cameras={result?.cameras ?? preview?.cameras ?? []}

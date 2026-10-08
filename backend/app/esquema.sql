@@ -69,7 +69,9 @@ CREATE TABLE IF NOT EXISTS paradas (
     -- fecha de cierre, o la programada). Si la fecha no es la de su jornada,
     -- la tarea se reprogramó por fuera del programa (ver v_paradas).
     cuadrilla       TEXT,
-    fecha_informada TEXT,                    -- AAAA-MM-DD
+    fecha_informada TEXT,                    -- AAAA-MM-DD: fecha de ejecución
+    requiere_camion TEXT,                    -- «INDICAR SI REQUIERE CAMION» de Zeta
+    pendientes_manual TEXT,                  -- escritos a mano; si no, se calculan
     UNIQUE (recorrido_id, orden)
 );
 
@@ -137,7 +139,7 @@ CREATE TABLE IF NOT EXISTS correcciones (
     corregido_en   TEXT    NOT NULL,
     usuario        TEXT    NOT NULL,         -- usuario con el que inició sesión
     nombre         TEXT    NOT NULL,         -- su nombre visible en ese momento
-    campo          TEXT    NOT NULL CHECK (campo IN ('estado', 'observacion', 'nodo_migrado')),
+    campo          TEXT    NOT NULL,         -- columna de `paradas` (o «jornada», si se movió)
     valor_anterior TEXT,
     valor_nuevo    TEXT
 );

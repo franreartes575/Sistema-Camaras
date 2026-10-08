@@ -120,16 +120,21 @@ programada). Una fila de un día anterior al que ya tiene la tarea no se aplica
 formato anterior ("Realizado") no cambia. Esa planilla no trae coordenadas de lo
 no realizado: sirve para el Registro, no para replanificar sin él.
 
-**Cambios hechos fuera del programa** (esquema v5): de cada fila del
-seguimiento se guardan la cuadrilla (`Cuadrilla`, `Técnico`, `Móvil`,
-`Equipo`…; `_CREW_PATTERNS`) y el día en que se trabajó (`fecha_informada`:
-la de cierre si viene, si no la programada). Si no es el día de su jornada,
-la tarea es `fuera_de_plan` (columna derivada en `v_paradas`, y valor del
-filtro `estado`, aunque no es un estado). La carga lo informa
-(`off_plan_tasks`, `crews_by_day`) y cruza igual: la fila cae en la tarea
-más reciente de esa cámara. Una fila sin novedad sólo guarda cuadrilla y
-fecha si la fecha cambió: si no, no marcaría como verificada una tarea que
-nadie tocó (y eso impide reemplazar el plan).
+**Fecha de ejecución, cuadrilla y pendientes** (esquemas v5 y v6). El plan
+conserva sus fechas planificadas; de cada fila informada (realizada o no
+realizada) se guarda la cuadrilla (`Cuadrilla`, `Técnico`, `Móvil`…;
+`_CREW_PATTERNS`), la **fecha de ejecución** (`fecha_informada`: el día en que
+pasó la cuadrilla, fila por fila — `Fin Atención`, si no `Fecha Cierre`, si no
+`Inicio Atención`, ver `worked_date_columns`; si la planilla no trae ninguna,
+la programada) y «INDICAR SI REQUIERE CAMION» (`requiere_camion`). Una orden
+todavía abierta no se ejecutó: no toca nada, aunque Zeta la haya reprogramado.
+Si la ejecución no es el día de la jornada, la tarea es `fuera_de_plan`
+(derivada en `v_paradas`, y valor del filtro `estado` aunque no es un estado).
+**Pendientes** (`services/pendientes.py`) se calcula al leer la tarea, no se
+guarda: reglas sobre frases reales de Zeta (reprogramar y por qué; «no se
+retira enlace… camión»). Una frase nueva se agrega ahí con su test. El Excel
+del Registro suma «Fecha de ejecución», «Cuadrilla» y «Pendientes» al final;
+vuelto a subir, las dos primeras se reconocen solas.
 
 La jornada con menos cámaras queda siempre última (`_lightest_day_last` en
 `vrp.py`): es la que tiene lugar para sumarle lo que quede pendiente.
@@ -220,7 +225,18 @@ ingesta va ahí, no duplicada.
   recalcular— para no duplicar el plan; ante 409 o 404 guarda uno nuevo. Si el
   nombre era el automático, sigue a las fechas nuevas.
 - Corregir una tarea a mano (`PATCH /registro/tareas/{id}`) es sólo de
-  administradores. Cada campo que cambia deja una fila en `correcciones`
+  administradores. El editor (`TaskEditor.tsx`, un `<dialog>` nativo) cambia
+  cualquier dato: ID, coordenadas, nodos, estado, ejecución, cuadrilla,
+  camión, observación, pendientes a mano (`pendientes_manual`, null = vuelve a
+  automático) y `route_id` (otra jornada del mismo plan, al final de ese día;
+  la polilínea y los km de las jornadas no se recalculan). El nombre de cada
+  columna sale de `_EDITABLE_TEXT`, nunca del pedido. `PATCH /registro/recorridos/{id}`
+  cambia la fecha planificada de un día entero (`RouteDateEditor.tsx`); cada
+  tarea deja su corrección `fecha_planificada`.
+- **Un `<dialog>` no se cierra en la limpieza del `useEffect`**: `close()`
+  dispara el evento «close» → `onClose`, y en desarrollo React monta, desmonta
+  y vuelve a montar cada componente: la ventana se cerraba apenas se abría
+  (el botón «no hacía nada»). Al desmontar, el navegador la saca solo. Cada campo que cambia deja una fila en `correcciones`
   (usuario, valor anterior y nuevo) en la misma transacción; el autor sale de
   la sesión, nunca del pedido. La tabla guarda cámara, plan y fecha propios
   para sobrevivir al borrado del plan (`parada_id` queda en NULL).

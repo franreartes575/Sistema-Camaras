@@ -21,6 +21,8 @@ import RouteList, { STATE_FILTERS, type StateFilter } from "@/components/registr
 import Summary from "@/components/registro/Summary";
 import TaskList, { TASK_VIEWS, type TaskView } from "@/components/registro/TaskList";
 import FiltersBar from "@/components/registro/FiltersBar";
+import PanelResizer from "@/components/ui/PanelResizer";
+import { RESIZABLE_PANEL, useResizablePanel } from "@/lib/usePanelWidth";
 import { Notice } from "@/components/ui/controls";
 import { IconDatabase } from "@/components/ui/icons";
 import { downloadBlob } from "@/lib/download";
@@ -35,6 +37,7 @@ import {
   registryPaths,
   routeState,
   updatePlan,
+  updateRoute,
   updateTask,
   type FollowUpImport,
   type FollowUpResult,
@@ -102,6 +105,7 @@ type Props = {
 
 export default function RegistroView({ refreshKey, canEditTasks, mobileView, onShowMap, onPlanTasks }: Props) {
   const [today] = useState(todayIso);
+  const registroPanel = useResizablePanel("registro", 432);
   const [baseFilters, setBaseFilters] = useState<RegistryFilters>(EMPTY_FILTERS);
   // "none": todavía no eligió nada, no se muestra ningún plan. null: eligió "Todos los planes".
   const [planChoice, setPlanChoice] = useState<number | null | "none">("none");
@@ -115,6 +119,7 @@ export default function RegistroView({ refreshKey, canEditTasks, mobileView, onS
   const [expandedId, setExpandedId] = useState<number | null>(null);
   const [localVersion, setLocalVersion] = useState(0);
   const [busyTaskId, setBusyTaskId] = useState<number | null>(null);
+  const [busyRouteId, setBusyRouteId] = useState<number | null>(null);
   const [busyPlanId, setBusyPlanId] = useState<number | null>(null);
   const [isUploading, setIsUploading] = useState(false);
   const [uploadResult, setUploadResult] = useState<FollowUpResult | null>(null);
@@ -278,6 +283,22 @@ export default function RegistroView({ refreshKey, canEditTasks, mobileView, onS
 
   // ------------------------------------------------------------ acciones
 
+  /** Cambia la fecha planificada de un día entero; devuelve si se guardó. */
+  const changeRouteDate = async (route: RouteSummary, date: string): Promise<boolean> => {
+    setBusyRouteId(route.id);
+    setActionError(null);
+    try {
+      await updateRoute(route.id, { date });
+      refresh();
+      return true;
+    } catch (err) {
+      setActionError(errorMessage(err));
+      return false;
+    } finally {
+      setBusyRouteId(null);
+    }
+  };
+
   const changeTask = async (task: Task, changes: TaskChanges): Promise<boolean> => {
     setBusyTaskId(task.id);
     setActionError(null);
@@ -409,7 +430,8 @@ export default function RegistroView({ refreshKey, canEditTasks, mobileView, onS
   return (
     <div className="flex min-h-0 flex-1">
       <aside
-        className={`${mobileView === "panel" ? "block" : "hidden"} w-full overflow-y-auto border-slate-800 md:block md:w-[25rem] md:shrink-0 md:border-r lg:w-[27rem]`}
+        style={registroPanel.panelStyle}
+        className={`${mobileView === "panel" ? "block" : "hidden"} w-full overflow-y-auto border-slate-800 md:block md:border-r ${RESIZABLE_PANEL}`}
       >
         <div className="space-y-4 px-4 py-5 md:px-5">
           <div className="flex items-start justify-between gap-3">
@@ -505,6 +527,8 @@ export default function RegistroView({ refreshKey, canEditTasks, mobileView, onS
                 onSetMany={setMany}
                 onFocus={focusRoute}
                 onTaskUpdate={canEditTasks ? changeTask : undefined}
+                onRouteDate={canEditTasks ? changeRouteDate : undefined}
+                busyRouteId={busyRouteId}
               />
               </div>
             )}
@@ -544,10 +568,11 @@ export default function RegistroView({ refreshKey, canEditTasks, mobileView, onS
           </div>
         </div>
       </aside>
+      <PanelResizer label="el panel del Registro" {...registroPanel.resizer} />
 
       <section
         aria-label="Avance y mapa del registro"
-        className={`${mobileView === "map" ? "flex" : "hidden"} min-h-0 flex-1 flex-col md:flex`}
+        className={`${mobileView === "map" ? "flex" : "hidden"} min-h-0 min-w-0 flex-1 flex-col md:flex`}
       >
         <div className="hidden border-b border-slate-800 bg-slate-950 px-5 py-4 md:block">{summary}</div>
         {detailError && (

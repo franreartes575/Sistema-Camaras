@@ -81,6 +81,12 @@ export type Task = {
   reported_date: string | null;
   /** Se trabajó otro día que el planificado: un cambio hecho fuera del programa. */
   off_plan: boolean;
+  /** Lo que queda por hacer según la observación (reprogramar, retirar con camión…). */
+  pending_actions: string | null;
+  /** Los pendientes los escribió alguien a mano (no se recalculan). */
+  pending_manual: boolean;
+  /** «INDICAR SI REQUIERE CAMION» de Zeta. */
+  truck: string | null;
 };
 
 export type RouteDetail = RouteSummary & {
@@ -232,11 +238,28 @@ export function deletePlan(planId: number): Promise<void> {
   return request<void>(`/registro/planes/${planId}`, { method: "DELETE" });
 }
 
+/** Cambios a una tarea: sólo los campos que se mandan. `pending_actions: null`
+ * vuelve a los pendientes automáticos; `route_id`, a otra jornada del plan. */
 export type TaskChanges = {
   status?: ReportedStatus;
   observation?: string | null;
   migrated_node?: string | null;
+  camera_id?: string;
+  label?: string | null;
+  node?: string | null;
+  lat?: number;
+  lon?: number;
+  route_id?: number;
+  reported_date?: string | null;
+  crew?: string | null;
+  truck?: string | null;
+  pending_actions?: string | null;
 };
+
+/** Cambia la fecha planificada de una jornada entera (sólo administradores). */
+export function updateRoute(routeId: number, changes: { date: string }): Promise<RouteSummary> {
+  return sendJson<RouteSummary>(`/registro/recorridos/${routeId}`, "PATCH", changes);
+}
 
 export function updateTask(taskId: number, changes: TaskChanges): Promise<Task> {
   return sendJson<Task>(`/registro/tareas/${taskId}`, "PATCH", changes);
