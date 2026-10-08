@@ -35,11 +35,19 @@ from ..schemas import (
     RegistryRouteIn,
     RouteDetail,
     RouteSummary,
+    RouteUpdate,
     Task,
     TaskUpdate,
 )
 from .export import read_plan_id
-from .ingest import follow_up_mapping, is_orders_format, read_dataframe, reported_status
+from .pendientes import pendientes
+from .ingest import (
+    follow_up_mapping,
+    is_orders_format,
+    read_dataframe,
+    reported_status,
+    worked_date_columns,
+)
 
 # Tope de filas por consulta: varios meses de operación entran holgados, y un
 # filtro mal puesto no arma una respuesta de cientos de MB.
@@ -125,8 +133,19 @@ _TASK_COLUMNS = """
      ORDER BY c.id DESC LIMIT 1) AS corrected_by,
     (SELECT c.corregido_en FROM correcciones c WHERE c.parada_id = v.id
      ORDER BY c.id DESC LIMIT 1) AS corrected_at,
-    v.cuadrilla AS crew, v.fecha_informada AS reported_date, v.fuera_de_plan AS off_plan
+    v.cuadrilla AS crew, v.fecha_informada AS reported_date, v.fuera_de_plan AS off_plan,
+    v.requiere_camion AS truck, v.pendientes_manual AS pending_manual_text
 """
+
+
+def _task(row: sqlite3.Row) -> Task:
+    """Una tarea de la API, con sus pendientes calculados de la observación."""
+    data = dict(row)
+    truck = data["truck"]
+    manual = data.pop("pending_manual_text")
+    data["pending_manual"] = manual is not None
+    data["pending_actions"] = manual or pendientes(data["status"], data["observation"], truck)
+    return Task(**data)
 
 # Filtro de tareas que no es un estado: las que se trabajaron otro día.
 OFF_PLAN = "fuera_de_plan"
@@ -371,6 +390,45 @@ def list_routes(conn: sqlite3.Connection, filters: Filters) -> list[RouteSummary
     return [RouteSummary(**dict(row)) for row in rows]
 
 
+def get_route(conn: sqlite3.Connection, route_id: int) -> RouteSummary:
+    row = conn.execute(f"SELECT {_ROUTE_COLUMNS} FROM v_recorridos v WHERE v.id = ?", (route_id,)).fetchone()
+    if row is None:
+        raise NotFoundError(f"No existe la jornada {route_id} en el registro.")
+    return RouteSummary(**dict(row))
+
+
+def update_route(
+    conn: sqlite3.Connection, route_id: int, changes: RouteUpdate, author: Author
+) -> RouteSummary:
+    """Cambia la fecha planificada de una jornada entera.
+
+    Cada tarea de la jornada deja su corrección (campo `fecha_planificada`)
+    con el autor, en la misma transacción. Lo «fuera del plan» se recalcula
+    solo: se deriva comparando con la fecha de ejecución.
+    """
+    new_date = changes.date.isoformat()
+    with conn:
+        current = conn.execute(
+            "SELECT plan_id, fecha FROM recorridos WHERE id = ?", (route_id,)
+        ).fetchone()
+        if current is None:
+            raise NotFoundError(f"No existe la jornada {route_id} en el registro.")
+        if current["fecha"] != new_date:
+            now = _now()
+            conn.execute("UPDATE recorridos SET fecha = ? WHERE id = ?", (new_date, route_id))
+            conn.execute(
+                """
+                INSERT INTO correcciones (parada_id, plan_id, camara_id, fecha, corregido_en,
+                                          usuario, nombre, campo, valor_anterior, valor_nuevo)
+                SELECT id, ?, camara_id, ?, ?, ?, ?, 'fecha_planificada', ?, ?
+                FROM paradas WHERE recorrido_id = ?
+                """,
+                (current["plan_id"], current["fecha"], now, author.username, author.name,
+                 current["fecha"], new_date, route_id),
+            )
+    return get_route(conn, route_id)
+
+
 def list_tasks(
     conn: sqlite3.Connection, filters: Filters, statuses: list[str] | None = None
 ) -> list[Task]:
@@ -397,7 +455,7 @@ def list_tasks(
         """,
         params,
     ).fetchall()
-    return [Task(**dict(row)) for row in rows]
+    return [_task(row) for row in rows]
 
 
 def route_details(conn: sqlite3.Connection, route_ids: list[int]) -> list[RouteDetail]:
@@ -421,7 +479,7 @@ def route_details(conn: sqlite3.Connection, route_ids: list[int]) -> list[RouteD
         f"SELECT {_TASK_COLUMNS} FROM v_paradas v WHERE v.recorrido_id IN ({marks}) ORDER BY v.orden",
         unique,
     ):
-        stops[row["route_id"]].append(Task(**dict(row)))
+        stops[row["route_id"]].append(_task(row))
     return [
         RouteDetail(**summaries[route_id], geometry=geometries[route_id], stops=stops[route_id])
         for route_id in unique
@@ -433,34 +491,61 @@ def get_task(conn: sqlite3.Connection, task_id: int) -> Task:
     row = conn.execute(f"SELECT {_TASK_COLUMNS} FROM v_paradas v WHERE v.id = ?", (task_id,)).fetchone()
     if row is None:
         raise NotFoundError(f"No existe la tarea {task_id} en el registro.")
-    return Task(**dict(row))
+    return _task(row)
 
 
-def _requested_values(changes: TaskUpdate) -> dict[str, str | None]:
+# Campo de la API → columna de `paradas`, para el editor de tareas. Los
+# nombres de columna del UPDATE salen de acá, nunca del pedido.
+_EDITABLE_TEXT = {
+    "observation": "observacion",
+    "migrated_node": "nodo_migrado",
+    "label": "descripcion",
+    "node": "nodo_preliminar",
+    "crew": "cuadrilla",
+    "truck": "requiere_camion",
+    "pending_actions": "pendientes_manual",
+}
+
+
+def _requested_values(changes: TaskUpdate) -> dict[str, object]:
     """Columna de `paradas` → valor pedido, sólo de los campos que vinieron."""
     fields = changes.model_fields_set
-    values: dict[str, str | None] = {}
+    values: dict[str, object] = {}
     if "status" in fields and changes.status is not None:
         values["estado"] = changes.status
-    if "observation" in fields:
-        values["observacion"] = _clean(changes.observation)
-    if "migrated_node" in fields:
-        values["nodo_migrado"] = _clean(changes.migrated_node)
+    for field, column in _EDITABLE_TEXT.items():
+        if field in fields:
+            values[column] = _clean(getattr(changes, field))
+    if "camera_id" in fields and changes.camera_id is not None:
+        camera_id = _clean(changes.camera_id)
+        if not camera_id:
+            raise ValueError("El ID de la cámara no puede quedar vacío.")
+        values["camara_id"] = camera_id
+    for field in ("lat", "lon"):
+        if field in fields and getattr(changes, field) is not None:
+            values[field] = getattr(changes, field)
+    if "reported_date" in fields:
+        values["fecha_informada"] = changes.reported_date.isoformat() if changes.reported_date else None
     return values
 
 
-def update_task(conn: sqlite3.Connection, task_id: int, changes: TaskUpdate, author: Author) -> Task:
-    """Corrección manual: estado, observación o nodo migrado de una tarea.
+def _route_label(fecha: str, dia: int) -> str:
+    return f"{fecha} (día {dia})"
 
-    Cada campo que de verdad cambia queda en `correcciones` con su autor y el
-    valor anterior, en la misma transacción. Pedir lo que ya estaba no toca
-    nada (ni `verificado_en`).
+
+def update_task(conn: sqlite3.Connection, task_id: int, changes: TaskUpdate, author: Author) -> Task:
+    """Corrección manual de cualquier dato de una tarea.
+
+    `route_id` la pasa a otra jornada del mismo plan (cambia su fecha
+    planificada; va al final de esa jornada). Cada campo que de verdad cambia
+    queda en `correcciones` con su autor y el valor anterior, en la misma
+    transacción. Pedir lo que ya estaba no toca nada (ni `verificado_en`).
     """
     requested = _requested_values(changes)
     with conn:
         current = conn.execute(
             """
-            SELECT pa.estado, pa.observacion, pa.nodo_migrado, pa.camara_id, r.plan_id, r.fecha
+            SELECT pa.*, r.plan_id AS plan, r.fecha, r.dia
             FROM paradas pa JOIN recorridos r ON r.id = pa.recorrido_id
             WHERE pa.id = ?
             """,
@@ -469,9 +554,30 @@ def update_task(conn: sqlite3.Connection, task_id: int, changes: TaskUpdate, aut
         if current is None:
             raise NotFoundError(f"No existe la tarea {task_id} en el registro.")
         changed = {column: value for column, value in requested.items() if current[column] != value}
+        log = [
+            (column, current[column], value) for column, value in changed.items()
+        ]
+
+        if changes.route_id is not None and changes.route_id != current["recorrido_id"]:
+            target = conn.execute(
+                "SELECT plan_id, fecha, dia FROM recorridos WHERE id = ?", (changes.route_id,)
+            ).fetchone()
+            if target is None:
+                raise NotFoundError(f"No existe la jornada {changes.route_id} en el registro.")
+            if target["plan_id"] != current["plan"]:
+                raise ValueError("La jornada elegida es de otro plan: una tarea sólo se mueve dentro de su plan.")
+            last = conn.execute(
+                "SELECT COALESCE(MAX(orden), 0) FROM paradas WHERE recorrido_id = ?", (changes.route_id,)
+            ).fetchone()[0]
+            changed["recorrido_id"] = changes.route_id
+            changed["orden"] = last + 1
+            log.append((
+                "jornada", _route_label(current["fecha"], current["dia"]),
+                _route_label(target["fecha"], target["dia"]),
+            ))
+
         if changed:
             now = _now()
-            # Los nombres de columna salen de `_requested_values`, nunca del pedido.
             assignments = ", ".join(f"{column} = ?" for column in changed)
             conn.execute(
                 f"UPDATE paradas SET {assignments}, verificado_en = ? WHERE id = ?",
@@ -484,9 +590,10 @@ def update_task(conn: sqlite3.Connection, task_id: int, changes: TaskUpdate, aut
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 [
-                    (task_id, current["plan_id"], current["camara_id"], current["fecha"], now,
-                     author.username, author.name, column, current[column], value)
-                    for column, value in changed.items()
+                    (task_id, current["plan"], current["camara_id"], current["fecha"], now,
+                     author.username, author.name, column,
+                     None if before is None else str(before), None if after is None else str(after))
+                    for column, before, after in log
                 ],
             )
     return get_task(conn, task_id)
@@ -510,6 +617,7 @@ class _Candidate:
     preliminary_node: str | None = None
     crew: str | None = None
     reported_date: dt.date | None = None
+    truck: str | None = None
 
 
 @dataclass(frozen=True)
@@ -523,12 +631,14 @@ class _FollowUpRow:
     # Planilla de órdenes de trabajo ("Cierre"): reglas propias, ver `_orders_update`.
     orders: bool = False
     crew: str | None = None
-    # Cuándo se cerró la orden, si la planilla lo trae.
+    # Cuándo pasó la cuadrilla (fin o inicio de la atención), si la planilla lo trae.
     worked_date: dt.date | None = None
+    truck: str | None = None
 
     @property
     def reported_date(self) -> dt.date | None:
-        """El día en que se trabajó: el de cierre o, si no, el programado."""
+        """Fecha de ejecución: el día en que pasó la cuadrilla o, si la
+        planilla no lo trae, el programado."""
         return self.worked_date or self.date
 
 
@@ -577,6 +687,7 @@ def _read_follow_up(filename: str, raw: bytes) -> tuple[list[_FollowUpRow], str 
         )
     frame.columns = [str(column) for column in frame.columns]
     orders = is_orders_format(columns["done"])
+    worked_columns = worked_date_columns(list(frame.columns))
 
     def get(record: dict, role: str) -> object:
         column = columns[role]
@@ -597,7 +708,10 @@ def _read_follow_up(filename: str, raw: bytes) -> tuple[list[_FollowUpRow], str 
                 reason=_cell_text(get(record, "reason")),
                 orders=orders,
                 crew=_cell_text(get(record, "crew")),
-                worked_date=_cell_date(get(record, "worked_date")),
+                worked_date=next(
+                    (date for column in worked_columns if (date := _cell_date(record[column]))), None
+                ),
+                truck=_cell_text(get(record, "truck")),
             )
         )
     return rows, columns["crew"]
@@ -655,7 +769,8 @@ def _load_candidates(
         chunk = ids[start:start + _IN_CHUNK]
         sql = f"""
             SELECT pa.id, pa.camara_id, pa.estado, pa.observacion, pa.nodo_migrado,
-                   pa.nodo_preliminar, pa.cuadrilla, pa.fecha_informada, r.plan_id, r.fecha
+                   pa.nodo_preliminar, pa.cuadrilla, pa.fecha_informada, pa.requiere_camion,
+                   r.plan_id, r.fecha
             FROM paradas pa JOIN recorridos r ON r.id = pa.recorrido_id
             WHERE pa.camara_id IN ({', '.join('?' for _ in chunk)})
         """
@@ -671,6 +786,7 @@ def _load_candidates(
                     observation=row["observacion"], migrated_node=row["nodo_migrado"],
                     preliminary_node=row["nodo_preliminar"],
                     crew=row["cuadrilla"],
+                    truck=row["requiere_camion"],
                     reported_date=(
                         dt.date.fromisoformat(row["fecha_informada"]) if row["fecha_informada"] else None
                     ),
@@ -748,7 +864,7 @@ def import_follow_up(
                 not_done += 1
             else:
                 no_news += 1
-            if row.crew and row.reported_date:
+            if row.status and row.crew and row.reported_date:
                 crews[(row.reported_date, row.crew)] += 1
             for target in targets:
                 touched_plans[target.plan_id] += 1
@@ -757,7 +873,7 @@ def import_follow_up(
                 # no pisa lo más nuevo. Caso 1-1494: no realizada el 05/10,
                 # hecha por otra cuadrilla el 06/10.
                 if (
-                    row.reported_date and target.reported_date
+                    row.status and row.reported_date and target.reported_date
                     and row.reported_date < target.reported_date
                 ):
                     stale += 1
@@ -768,39 +884,41 @@ def import_follow_up(
                     status = row.status or target.status
                     observation = row.observation or target.observation
                     migrated = row.migrated_node or target.migrated_node
-                crew = row.crew or target.crew
-                reported = row.reported_date or target.reported_date
-                # Una fila sin novedad sólo aporta si la tarea cambió de día
-                # (una reprogramación lo es): si no, no toca nada, ni la marca
-                # como verificada.
-                if row.status is None and reported in (None, target.date):
-                    crew, reported = target.crew, target.reported_date
+                # Fecha de ejecución, cuadrilla y camión vienen con lo informado:
+                # una orden todavía abierta no se ejecutó (aunque Zeta la haya
+                # reprogramado, el plan conserva su fecha) y no toca nada.
+                if row.status is None:
+                    crew, reported, truck = target.crew, target.reported_date, target.truck
+                else:
+                    crew = row.crew or target.crew
+                    reported = row.reported_date or target.reported_date
+                    truck = row.truck or target.truck
                 if reported is not None and reported != target.date:
                     off_plan[target.id] = OffPlanTask(
                         camera_id=row.camera_id, planned_date=target.date,
                         reported_date=reported, crew=crew,
                     )
-                if (status, observation, migrated, crew, reported) == (
+                if (status, observation, migrated, crew, reported, truck) == (
                     target.status, target.observation, target.migrated_node,
-                    target.crew, target.reported_date,
+                    target.crew, target.reported_date, target.truck,
                 ):
                     continue
                 conn.execute(
                     """
                     UPDATE paradas
                     SET estado = ?, observacion = ?, nodo_migrado = ?, cuadrilla = ?,
-                        fecha_informada = ?, verificado_en = ?
+                        fecha_informada = ?, requiere_camion = ?, verificado_en = ?
                     WHERE id = ?
                     """,
                     (
                         status, observation, migrated, crew,
-                        reported.isoformat() if reported else None, now, target.id,
+                        reported.isoformat() if reported else None, truck, now, target.id,
                     ),
                 )
                 (
                     target.status, target.observation, target.migrated_node,
-                    target.crew, target.reported_date,
-                ) = (status, observation, migrated, crew, reported)
+                    target.crew, target.reported_date, target.truck,
+                ) = (status, observation, migrated, crew, reported, truck)
                 updated += 1
 
         plan_id = plan_hint or (touched_plans.most_common(1)[0][0] if touched_plans else None)

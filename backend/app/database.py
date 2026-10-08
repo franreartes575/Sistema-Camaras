@@ -23,7 +23,15 @@ from . import config
 #    se resuelva con un índice; ver `_migrate`.
 # 5: `paradas.cuadrilla` y `paradas.fecha_informada` (lo que dice el
 #    seguimiento) y `v_paradas.fuera_de_plan`.
-SCHEMA_VERSION = 5
+# 6: `paradas.requiere_camion` (para los pendientes).
+# 7: `paradas.pendientes_manual` y `correcciones` sin la lista fija de campos
+#    (el editor corrige cualquiera): SQLite no altera un CHECK, se rehace la tabla.
+SCHEMA_VERSION = 7
+
+_CORRECTIONS_COLUMNS = (
+    "id, parada_id, plan_id, camara_id, fecha, corregido_en, usuario, nombre, campo, "
+    "valor_anterior, valor_nuevo"
+)
 
 # Vistas que dependen de `paradas`: el esquema las crea con IF NOT EXISTS, así
 # que para cambiarlas hay que borrarlas antes (de la que depende de otra a la base).
@@ -41,6 +49,39 @@ def _columns(conn: sqlite3.Connection, table: str) -> set[str]:
     return {row[1] for row in conn.execute(f"PRAGMA table_info({table})")}
 
 
+def _rebuild_corrections(conn: sqlite3.Connection) -> None:
+    """v7: `correcciones` sin el CHECK de campos, conservando las filas."""
+    row = conn.execute(
+        "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'correcciones'"
+    ).fetchone()
+    if row is None or "CHECK (campo" not in row[0]:
+        return
+    conn.execute("ALTER TABLE correcciones RENAME TO correcciones_v6")
+    conn.execute("DROP INDEX IF EXISTS idx_correcciones_parada")
+    conn.execute(
+        """
+        CREATE TABLE correcciones (
+            id             INTEGER PRIMARY KEY AUTOINCREMENT,
+            parada_id      INTEGER REFERENCES paradas (id) ON DELETE SET NULL,
+            plan_id        INTEGER NOT NULL,
+            camara_id      TEXT    NOT NULL,
+            fecha          TEXT    NOT NULL,
+            corregido_en   TEXT    NOT NULL,
+            usuario        TEXT    NOT NULL,
+            nombre         TEXT    NOT NULL,
+            campo          TEXT    NOT NULL,
+            valor_anterior TEXT,
+            valor_nuevo    TEXT
+        )
+        """
+    )
+    conn.execute(
+        f"INSERT INTO correcciones ({_CORRECTIONS_COLUMNS}) "
+        f"SELECT {_CORRECTIONS_COLUMNS} FROM correcciones_v6"
+    )
+    conn.execute("DROP TABLE correcciones_v6")
+
+
 def _migrate(conn: sqlite3.Connection) -> None:
     """Lleva una base existente al esquema actual. Corre antes de `esquema.sql`,
     que sólo crea lo que falta y no altera tablas ni vistas que ya existen."""
@@ -56,9 +97,10 @@ def _migrate(conn: sqlite3.Connection) -> None:
                     "UPDATE paradas SET plan_id = "
                     "(SELECT r.plan_id FROM recorridos r WHERE r.id = paradas.recorrido_id)"
                 )
-            for column in ("cuadrilla", "fecha_informada"):  # v5
-                if column not in columns:
+            for column in ("cuadrilla", "fecha_informada", "requiere_camion", "pendientes_manual"):
+                if column not in columns:  # v5, v6 y v7
                     conn.execute(f"ALTER TABLE paradas ADD COLUMN {column} TEXT")
+        _rebuild_corrections(conn)
         for view in _VIEWS:
             conn.execute(f"DROP VIEW IF EXISTS {view}")
 

@@ -66,7 +66,12 @@ _CREW_PATTERNS = (
 _WORKED_DATE_PATTERNS = (
     r"fin\s*(de\s*)?(la\s*)?atenci",
     r"fecha\s*(de\s*)?cierre", r"fecha\s*(de\s*)?(ejecuci|realizaci|finalizaci|trabajo)",
+    # Una orden no realizada a veces trae sólo el inicio: igual es el día en
+    # que la cuadrilla pasó.
+    r"inicio\s*(de\s*)?(la\s*)?atenci",
 )
+# «INDICAR SI REQUIERE CAMION» de Zeta: qué parte hace falta subir con camión.
+_TRUCK_PATTERNS = (r"requiere\s*cami",)
 # En las órdenes de trabajo, el nodo al que se migró viene como "NODO".
 _MIGRATED_PATTERNS = (r"se\s+migr", r"nodo\s+migrado", r"nodo\s+(final|real)", r"^nodo$")
 # Planilla de órdenes de trabajo: el ID de la cámara es "ID Contrato" (no el
@@ -194,7 +199,20 @@ def follow_up_mapping(columns: list[str]) -> dict[str, str | None]:
         ) or worked_date,
         "crew": _match(columns, _CREW_PATTERNS),
         "worked_date": worked_date,
+        "truck": _match(columns, _TRUCK_PATTERNS),
     }
+
+
+def worked_date_columns(columns: list[str]) -> list[str]:
+    """Todas las columnas con la fecha de ejecución, de la más confiable a la
+    menos: en una misma planilla, la no realizada puede traer sólo el inicio
+    de la atención y la realizada, el fin. Se toma la primera con dato."""
+    found: list[str] = []
+    for pattern in _WORKED_DATE_PATTERNS:
+        for column in columns:
+            if column not in found and re.search(pattern, column.strip().lower()):
+                found.append(column)
+    return found
 
 
 def is_orders_format(done_column: str | None) -> bool:

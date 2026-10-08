@@ -44,8 +44,12 @@ _DONE_OPTIONS = '"Sí,No"'
 
 # Columnas extra del Excel de tareas del registro. Van al final para no mover
 # las que reconoce `suggest_mapping` al reimportarlo.
-TASK_EXTRA_COLUMNS = ["Estado", "Plan"]
-_TASK_EXTRA_WIDTHS = [16, 30]
+# La fecha de planificación queda como se planificó; al lado, cuándo pasó la
+# cuadrilla de verdad (se haya hecho o no), quién fue y qué falta según la
+# observación. Vuelto a subir como seguimiento, «Fecha de ejecución» y
+# «Cuadrilla» se reconocen solas (`follow_up_mapping`).
+TASK_EXTRA_COLUMNS = ["Estado", "Plan", "Fecha de ejecución", "Cuadrilla", "Pendientes"]
+_TASK_EXTRA_WIDTHS = [16, 30, 16, 14, 44]
 _STATUS_TEXT = {
     "pendiente": "Pendiente",
     "realizada": "Realizada",
@@ -114,7 +118,7 @@ def _append_follow_up_row(
     observation: str | None,
     done: str | None = None,
     migrated_node: str | None = None,
-    extra: list[str | None] | None = None,
+    extra: list[str | dt.date | None] | None = None,
     banded: bool = False,
 ) -> None:
     """Agrega una fila con las columnas de FOLLOW_UP_COLUMNS (y `extra` al final)."""
@@ -129,8 +133,11 @@ def _append_follow_up_row(
     _set_text(sheet.cell(row=row, column=7), node)
     sheet.cell(row=row, column=8, value=lat)
     sheet.cell(row=row, column=9, value=lon)
-    for offset, text in enumerate(extra or [], start=len(FOLLOW_UP_COLUMNS) + 1):
-        _set_text(sheet.cell(row=row, column=offset), text)
+    for offset, value in enumerate(extra or [], start=len(FOLLOW_UP_COLUMNS) + 1):
+        if isinstance(value, dt.date):
+            sheet.cell(row=row, column=offset, value=value).number_format = _DATE_FORMAT
+        else:
+            _set_text(sheet.cell(row=row, column=offset), value)
     if banded:
         for column in range(1, sheet.max_column + 1):
             sheet.cell(row=row, column=column).fill = _BAND_FILL
@@ -257,7 +264,10 @@ def build_tasks_workbook(tasks: list[Task]) -> bytes:
             sheet, camera_id=task.camera_id, date=task.date, order=task.order,
             lat=task.lat, lon=task.lon, node=task.node, observation=task.observation,
             done=_DONE_TEXT.get(task.status), migrated_node=task.migrated_node,
-            extra=[_STATUS_TEXT[task.status], task.plan_name],
+            extra=[
+                _STATUS_TEXT[task.status], task.plan_name, task.reported_date, task.crew,
+                task.pending_actions,
+            ],
             banded=bool(band % 2),
         )
     _finish_follow_up(sheet, _WIDTHS + _TASK_EXTRA_WIDTHS)

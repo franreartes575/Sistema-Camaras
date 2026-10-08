@@ -386,6 +386,11 @@ class Task(BaseModel):
     off_plan: bool = Field(
         False, description="Se trabajó otro día que el planificado (cambio hecho fuera del programa)"
     )
+    pending_actions: str | None = Field(
+        None, description="Lo que queda por hacer según la observación (reprogramar, retirar…)"
+    )
+    pending_manual: bool = Field(False, description="Los pendientes los escribió alguien a mano")
+    truck: str | None = Field(None, description="«INDICAR SI REQUIERE CAMION» de Zeta")
 
 
 class RouteDetail(RouteSummary):
@@ -396,11 +401,31 @@ class RouteDetail(RouteSummary):
 
 
 class TaskUpdate(BaseModel):
-    """Corrección manual de una tarea desde el registro."""
+    """Corrección manual de una tarea desde el registro: cualquiera de sus datos.
+
+    Sólo cuentan los campos que vienen en el pedido. Un texto en null o vacío
+    se borra; `pending_actions` en null vuelve a los pendientes automáticos.
+    """
 
     status: ReportedStatus | None = None
     observation: str | None = Field(None, max_length=2000)
     migrated_node: str | None = Field(None, max_length=200)
+    camera_id: str | None = Field(None, min_length=1, max_length=200)
+    label: str | None = Field(None, max_length=500)
+    node: str | None = Field(None, max_length=200, description="Nodo preliminar")
+    lat: float | None = Field(None, ge=-90, le=90)
+    lon: float | None = Field(None, ge=-180, le=180)
+    route_id: int | None = Field(None, ge=1, description="Jornada del mismo plan a la que pasa")
+    reported_date: dt.date | None = Field(None, description="Fecha de ejecución")
+    crew: str | None = Field(None, max_length=100)
+    truck: str | None = Field(None, max_length=100, description="Requiere camión")
+    pending_actions: str | None = Field(None, max_length=1000, description="Pendientes escritos a mano")
+
+
+class RouteUpdate(BaseModel):
+    """Cambio de una jornada entera desde el registro: su fecha planificada."""
+
+    date: dt.date
 
 
 class OffPlanTask(BaseModel):

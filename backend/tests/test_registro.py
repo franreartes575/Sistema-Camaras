@@ -736,7 +736,7 @@ def test_excel_de_todas_las_tareas_marca_lo_realizado(client: TestClient) -> Non
     response = client.get("/registro/tareas.xlsx")
 
     frame = pd.read_excel(io.BytesIO(response.content))
-    assert list(frame.columns[-2:]) == ["Estado", "Plan"]
+    assert list(frame.columns[-5:]) == ["Estado", "Plan", "Fecha de ejecución", "Cuadrilla", "Pendientes"]
     fila = frame.set_index("ID de la cámara").loc["C-1"]
     assert (fila["Realizado"], fila["Estado"]) == ("Sí", "Realizada")
     _, hechas = split_done(frame, suggest_mapping(list(frame.columns))["done"])
@@ -804,6 +804,7 @@ def test_reconoce_las_columnas_del_excel_exportado() -> None:
         "date": "Fecha de planificación",
         "crew": None,
         "worked_date": None,
+        "truck": None,
     }
 
 
@@ -955,6 +956,7 @@ def test_reconoce_las_columnas_de_la_planilla_de_ordenes() -> None:
         "date": "Fecha Programación",
         "crew": "Cuadrilla",
         "worked_date": "Fecha Cierre",
+        "truck": None,
     }
 
 
@@ -964,14 +966,21 @@ def test_en_las_ordenes_reales_el_dia_trabajado_es_fin_atencion() -> None:
     columnas = [
         "N° OT", "Estado", "ID Contrato", "Cuadrilla", "Fecha Programación", "Hora Programación",
         "Cierre", "Observaciones", "Obs. Cierre", "Fecha Creación", "Inicio Atención",
-        "Fin Atención", "Estado No Realizado", "NODO", "Técnico 1", "Técnico 2",
+        "Fin Atención", "Estado No Realizado", "INDICAR SI REQUIERE CAMION", "NODO",
+        "Técnico 1", "Técnico 2",
     ]
 
     mapeo = follow_up_mapping(columnas)
 
-    assert (mapeo["date"], mapeo["worked_date"], mapeo["crew"]) == (
-        "Fecha Programación", "Fin Atención", "Cuadrilla",
+    assert (mapeo["date"], mapeo["worked_date"], mapeo["crew"], mapeo["truck"]) == (
+        "Fecha Programación", "Fin Atención", "Cuadrilla", "INDICAR SI REQUIERE CAMION",
     )
+
+
+def test_sin_fin_de_atencion_la_ejecucion_sale_del_inicio() -> None:
+    columnas = ["ID Contrato", "Fecha Programación", "Cierre", "Inicio Atención"]
+
+    assert follow_up_mapping(columnas)["worked_date"] == "Inicio Atención"
 
 
 @pytest.mark.parametrize("encabezado", ["Cuadrilla", "Técnico", "Tecnico Asignado", "Móvil", "Equipo", "Brigada"])
@@ -1049,9 +1058,9 @@ def test_se_pueden_listar_solo_las_tareas_fuera_del_plan(client: TestClient) -> 
     assert set(_tareas(client, estado="fuera_de_plan")) == {("A-2", guardado["id"])}
 
 
-def test_una_orden_abierta_reprogramada_queda_marcada_sin_cambiar_el_estado(client: TestClient) -> None:
-    """Todavía sin cerrar, pero ya pasada a la otra cuadrilla para otro día:
-    eso también es un cambio del plan. Una sin novedad en su día, no toca nada."""
+def test_una_orden_abierta_no_tiene_fecha_de_ejecucion(client: TestClient) -> None:
+    """Sin cerrar, la cuadrilla todavía no pasó: aunque Zeta la haya
+    reprogramado, el plan conserva su fecha y no hay ejecución que marcar."""
     guardado = _plan_de_ordenes(client)
 
     resultado = _cargar(client, _ordenes([
@@ -1061,8 +1070,8 @@ def test_una_orden_abierta_reprogramada_queda_marcada_sin_cambiar_el_estado(clie
 
     tareas = _tareas(client)
     a3, a4 = tareas[("A-3", guardado["id"])], tareas[("A-4", guardado["id"])]
-    assert resultado["off_plan"] == 1 and resultado["updated"] == 1
-    assert (a3["status"], a3["crew"], a3["off_plan"]) == ("pendiente", "Cuadrilla 2", True)
+    assert resultado["off_plan"] == 0 and resultado["updated"] == 0
+    assert (a3["status"], a3["crew"], a3["reported_date"], a3["off_plan"]) == ("pendiente", None, None, False)
     assert (a4["crew"], a4["verified_at"]) == (None, None)
 
 
@@ -1098,3 +1107,213 @@ def test_sin_columna_de_cuadrilla_igual_detecta_el_cambio_de_dia(client: TestCli
     assert resultado["off_plan"] == 1
     assert resultado["off_plan_tasks"][0]["crew"] is None
     assert resultado["crews_by_day"] == []
+
+
+def test_el_excel_del_registro_dice_cuando_se_ejecuto_quien_y_que_falta(client: TestClient) -> None:
+    """El plan conserva sus fechas; al lado van la fecha de ejecución, la
+    cuadrilla y lo que queda pendiente según la observación."""
+    guardado = _plan_de_ordenes(client)
+    _cargar(client, _ordenes([
+        {"ID Contrato": "A-1", "Cierre": "REALIZADO", "Cuadrilla": "AE414WY", "NODO": "SOLIDARIDAD",
+         "Fin Atención": "5/10/2026 16:13",
+         "Obs. Cierre": "Se migra con éxito, no se retira enlace previamente instalado ya que es para camion"},
+        {"ID Contrato": "A-2", "Cierre": "NO REALIZADO", "Cuadrilla": "AE414UC",
+         "Estado No Realizado": "FIN DE TURNO", "Inicio Atención": "6/10/2026 17:50"},
+        {"ID Contrato": "A-3", "Cierre": "REALIZADO", "Cuadrilla": "AE414WY", "NODO": "SOLIDARIDAD",
+         "Fin Atención": "5/10/2026 12:00", "INDICAR SI REQUIERE CAMION": "ENLACE"},
+    ]))
+
+    tareas = _tareas(client)
+    a1, a2 = tareas[("A-1", guardado["id"])], tareas[("A-2", guardado["id"])]
+    assert (a1["date"], a1["reported_date"], a1["crew"]) == ("2026-10-05", "2026-10-05", "AE414WY")
+    assert a1["pending_actions"] == "Retirar el enlace anterior con camión"
+    assert (a2["date"], a2["reported_date"], a2["off_plan"]) == ("2026-10-05", "2026-10-06", True)
+    assert a2["pending_actions"] == "Reprogramar (fin de turno)"
+    assert tareas[("A-3", guardado["id"])]["pending_actions"] == "Requiere camión (enlace)"
+    assert tareas[("A-4", guardado["id"])]["pending_actions"] is None
+
+    contenido = client.get("/registro/tareas.xlsx", params={"plan_id": guardado["id"]}).content
+    frame = pd.read_excel(io.BytesIO(contenido)).set_index("ID de la cámara")
+    fila = frame.loc["A-2"]
+    assert fila["Fecha de planificación"] == pd.Timestamp("2026-10-05")
+    assert fila["Fecha de ejecución"] == pd.Timestamp("2026-10-06")
+    assert (fila["Cuadrilla"], fila["Pendientes"]) == ("AE414UC", "Reprogramar (fin de turno)")
+    assert pd.isna(frame.loc["A-4", "Fecha de ejecución"]) and pd.isna(frame.loc["A-4", "Cuadrilla"])
+
+    # El mismo Excel, vuelto a subir como seguimiento, deja todo igual.
+    assert _cargar(client, contenido, "registro.xlsx")["updated"] == 0
+
+
+# --------------------------------------------------------------------------
+# Editor completo de una tarea
+# --------------------------------------------------------------------------
+
+
+def _editar(client: TestClient, tarea: dict, **cambios: object):
+    return client.patch(f"/registro/tareas/{tarea['id']}", json=cambios)
+
+
+def test_se_editan_todos_los_datos_de_una_tarea(client: TestClient) -> None:
+    guardado = _guardar(client)
+    tarea = _tareas(client)[("C-1", guardado["id"])]
+
+    response = _editar(
+        client, tarea, camera_id=" C-1b ", label="Av. Belgrano 100", node="Atocha",
+        lat=-24.8, lon=-65.4, status="no_realizada", reported_date="2026-10-02",
+        crew="AE414UC", truck="ENLACE", migrated_node="Solidaridad", observation="Fin de turno",
+    )
+
+    assert response.status_code == 200, response.text
+    editada = response.json()
+    assert (editada["camera_id"], editada["label"], editada["node"]) == ("C-1b", "Av. Belgrano 100", "Atocha")
+    assert (editada["lat"], editada["lon"]) == (-24.8, -65.4)
+    assert (editada["status"], editada["reported_date"], editada["crew"]) == ("no_realizada", "2026-10-02", "AE414UC")
+    assert editada["off_plan"] is True  # planificada el 01/10
+    assert editada["pending_actions"] == "Reprogramar (fin de turno); Requiere camión (enlace)"
+    campos = {fila["campo"] for fila in _correcciones()}
+    assert campos == {
+        "camara_id", "descripcion", "nodo_preliminar", "lat", "lon", "estado", "fecha_informada",
+        "cuadrilla", "requiere_camion", "nodo_migrado", "observacion",
+    }
+
+
+def test_una_tarea_se_puede_pasar_a_otra_jornada_del_plan(client: TestClient) -> None:
+    """Cambia la fecha planificada: va al final de la otra jornada del mismo plan."""
+    guardado = _guardar(client)
+    tarea = _tareas(client)[("C-1", guardado["id"])]
+    otra = next(r for r in client.get("/registro/recorridos/").json() if r["date"] == "2026-10-02")
+
+    movida = _editar(client, tarea, route_id=otra["id"]).json()
+
+    assert (movida["route_id"], movida["date"], movida["order"]) == (otra["id"], "2026-10-02", 2)
+    (fila,) = _correcciones()
+    assert (fila["campo"], fila["valor_anterior"], fila["valor_nuevo"]) == (
+        "jornada", "2026-10-01 (día 1)", "2026-10-02 (día 2)",
+    )
+
+
+def test_no_se_pasa_una_tarea_a_una_jornada_de_otro_plan(client: TestClient) -> None:
+    primero = _guardar(client)
+    _guardar(client, _plan(_jornada("2026-11-01", 1, ["X-1"])))
+    tarea = _tareas(client)[("C-1", primero["id"])]
+    ajena = next(r for r in client.get("/registro/recorridos/").json() if r["date"] == "2026-11-01")
+
+    response = _editar(client, tarea, route_id=ajena["id"])
+
+    assert response.status_code == 422
+    assert "otro plan" in response.json()["detail"]
+
+
+@pytest.mark.parametrize(
+    "cambios", [{"camera_id": "   "}, {"lat": 95}, {"lon": -200}, {"reported_date": "no-es-fecha"}]
+)
+def test_el_editor_rechaza_datos_invalidos(client: TestClient, cambios: dict) -> None:
+    guardado = _guardar(client)
+    tarea = _tareas(client)[("C-1", guardado["id"])]
+
+    assert _editar(client, tarea, **cambios).status_code == 422
+    assert _correcciones() == []
+
+
+def test_los_pendientes_escritos_a_mano_quedan_hasta_volver_a_automatico(client: TestClient) -> None:
+    guardado = _plan_de_ordenes(client)
+    tarea = _tareas(client)[("A-3", guardado["id"])]
+    _cargar(client, _ordenes([{"ID Contrato": "A-3", "Cierre": "NO REALIZADO", "Estado No Realizado": "FIN DE TURNO"}]))
+
+    a_mano = _editar(client, tarea, pending_actions="Volver con escalera larga").json()
+    _cargar(client, _ordenes([{"ID Contrato": "A-3", "Cierre": "NO REALIZADO", "Estado No Realizado": "SIN LINEA DE VISTA"}]))
+    tras_cargar = _tareas(client)[("A-3", guardado["id"])]
+    automatico = _editar(client, tarea, pending_actions=None).json()
+
+    assert (a_mano["pending_actions"], a_mano["pending_manual"]) == ("Volver con escalera larga", True)
+    assert tras_cargar["pending_actions"] == "Volver con escalera larga"
+    assert automatico["pending_manual"] is False
+    assert automatico["pending_actions"].startswith("Reprogramar")
+
+
+def test_una_base_v6_conserva_sus_correcciones_al_migrar(client: TestClient) -> None:
+    """La tabla vieja sólo aceptaba tres campos (un CHECK que SQLite no altera):
+    se rehace sin perder filas, y después acepta cualquier campo."""
+    guardado = _guardar(client)
+    tarea = _tareas(client)[("C-1", guardado["id"])]
+    conn = database.connect()
+    conn.execute("DROP TABLE correcciones")
+    conn.execute(
+        """CREATE TABLE correcciones (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            parada_id INTEGER REFERENCES paradas (id) ON DELETE SET NULL,
+            plan_id INTEGER NOT NULL, camara_id TEXT NOT NULL, fecha TEXT NOT NULL,
+            corregido_en TEXT NOT NULL, usuario TEXT NOT NULL, nombre TEXT NOT NULL,
+            campo TEXT NOT NULL CHECK (campo IN ('estado', 'observacion', 'nodo_migrado')),
+            valor_anterior TEXT, valor_nuevo TEXT)"""
+    )
+    conn.execute(
+        "INSERT INTO correcciones (parada_id, plan_id, camara_id, fecha, corregido_en, usuario, "
+        "nombre, campo, valor_anterior, valor_nuevo) VALUES (?, ?, 'C-1', '2026-10-01', 'x', "
+        "'admin', 'Admin', 'estado', 'pendiente', 'realizada')",
+        (tarea["id"], guardado["id"]),
+    )
+    conn.execute("ALTER TABLE paradas DROP COLUMN pendientes_manual")
+    conn.execute("PRAGMA user_version = 6")
+    conn.commit()
+    conn.close()
+    database._initialized.clear()
+
+    assert _editar(client, tarea, lat=-24.81).status_code == 200
+
+    assert [(f["usuario"], f["campo"]) for f in _correcciones()] == [("admin", "estado"), ("pruebas", "lat")]
+
+
+# --------------------------------------------------------------------------
+# Editar una jornada entera
+# --------------------------------------------------------------------------
+
+
+def _jornada_del(client: TestClient, fecha: str) -> dict:
+    return next(r for r in client.get("/registro/recorridos/").json() if r["date"] == fecha)
+
+
+def test_se_cambia_la_fecha_planificada_de_un_dia_entero(client: TestClient) -> None:
+    guardado = _guardar(client)
+    jornada = _jornada_del(client, "2026-10-01")
+
+    response = client.patch(f"/registro/recorridos/{jornada['id']}", json={"date": "2026-10-09"})
+
+    assert response.status_code == 200, response.text
+    assert response.json()["date"] == "2026-10-09"
+    tareas = _tareas(client)
+    assert {tareas[(c, guardado["id"])]["date"] for c in ("C-1", "C-2")} == {"2026-10-09"}
+    assert tareas[("C-3", guardado["id"])]["date"] == "2026-10-02"  # la otra jornada no cambia
+    filas = _correcciones()
+    assert {(f["camara_id"], f["campo"], f["valor_anterior"], f["valor_nuevo"]) for f in filas} == {
+        ("C-1", "fecha_planificada", "2026-10-01", "2026-10-09"),
+        ("C-2", "fecha_planificada", "2026-10-01", "2026-10-09"),
+    }
+
+
+def test_cambiar_el_dia_recalcula_lo_que_quedo_fuera_del_plan(client: TestClient) -> None:
+    """Si el día se movió a cuando de verdad se trabajó, deja de estar fuera del plan."""
+    guardado = _guardar(client)
+    tarea = _tareas(client)[("C-1", guardado["id"])]
+    _editar(client, tarea, status="realizada", reported_date="2026-10-03")
+    assert _tareas(client)[("C-1", guardado["id"])]["off_plan"] is True
+
+    client.patch(f"/registro/recorridos/{tarea['route_id']}", json={"date": "2026-10-03"})
+
+    assert _tareas(client)[("C-1", guardado["id"])]["off_plan"] is False
+
+
+def test_mover_un_dia_es_solo_para_administradores(client: TestClient, como_operador) -> None:
+    _guardar(client)
+    jornada = _jornada_del(client, "2026-10-01")
+
+    assert client.patch(f"/registro/recorridos/{jornada['id']}", json={"date": "2026-10-09"}).status_code == 403
+
+
+def test_mover_un_dia_valida_la_fecha_y_la_jornada(client: TestClient) -> None:
+    _guardar(client)
+    jornada = _jornada_del(client, "2026-10-01")
+
+    assert client.patch(f"/registro/recorridos/{jornada['id']}", json={"date": "09/10"}).status_code == 422
+    assert client.patch("/registro/recorridos/999", json={"date": "2026-10-09"}).status_code == 404
+    assert _correcciones() == []

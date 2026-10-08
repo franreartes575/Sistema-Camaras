@@ -24,6 +24,7 @@ from .schemas import (
     RegistryPlanIn,
     RouteDetail,
     RouteSummary,
+    RouteUpdate,
     Task,
     TaskUpdate,
 )
@@ -149,6 +150,20 @@ def list_routes(conn: Db, filters: Filters) -> list[RouteSummary]:
     return registro.list_routes(conn, filters)
 
 
+@router.patch("/recorridos/{route_id}", response_model=RouteSummary)
+def update_route(
+    route_id: int,
+    changes: RouteUpdate,
+    conn: Db,
+    sesion: Annotated[SesionActiva, Depends(requiere_admin)],
+) -> RouteSummary:
+    """Cambia la fecha planificada de una jornada entera (sólo administradores)."""
+    try:
+        return registro.update_route(conn, route_id, changes, _author(sesion))
+    except registro.NotFoundError as exc:
+        raise _not_found(exc) from exc
+
+
 @router.get("/recorridos/detalle", response_model=list[RouteDetail])
 def route_details(
     conn: Db,
@@ -208,6 +223,8 @@ def update_task(
         return registro.update_task(conn, task_id, changes, author)
     except registro.NotFoundError as exc:
         raise _not_found(exc) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
 
 
 # ---------------------------------------------------------------- Seguimientos
