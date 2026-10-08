@@ -22,8 +22,10 @@ import {
   Section,
   VisitAgeBars,
 } from "@/components/inicio/Charts";
+import PanelResizer from "@/components/ui/PanelResizer";
 import { BUTTON, Notice } from "@/components/ui/controls";
 import { IconCalendar, IconDatabase, IconShield } from "@/components/ui/icons";
+import { RESIZABLE_PANEL, useResizablePanel } from "@/lib/usePanelWidth";
 import type { Depot } from "@/lib/api";
 import {
   catalogPaths,
@@ -82,6 +84,7 @@ export default function InicioView({
 
   const summary = useJson<CatalogSummary>(catalogPaths.summary(depotMaxKm), version);
   const plans = useJson<PlanSummary[]>(registryPaths.plans, version);
+  const inicioPanel = useResizablePanel("inicio", 544);
   const clusters = useJson<CatalogClusters>(catalogPaths.clusters(epsKm, CLUSTER_PALETTE.length, byDepot, depotMaxKm), version);
 
   const allCameras = useMemo(() => cameras ?? [], [cameras]);
@@ -97,7 +100,8 @@ export default function InicioView({
   return (
     <div className="flex min-h-0 flex-1">
       <div
-        className={`${mobileView === "panel" ? "block" : "hidden"} w-full overflow-y-auto border-slate-800 md:block md:w-[28rem] md:shrink-0 md:border-r lg:w-[34rem] xl:w-[38rem]`}
+        style={inicioPanel.panelStyle}
+        className={`${mobileView === "panel" ? "block" : "hidden"} w-full overflow-y-auto border-slate-800 md:block md:border-r ${RESIZABLE_PANEL}`}
       >
         <div className="space-y-6 px-4 py-5 md:px-5">
           <header className="flex flex-wrap items-end justify-between gap-2">
@@ -250,9 +254,11 @@ export default function InicioView({
         </div>
       </div>
 
+      <PanelResizer label="el panel de Inicio" {...inicioPanel.resizer} />
+
       <section
         aria-label="Mapa del catálogo"
-        className={`${mobileView === "map" ? "block" : "hidden"} relative min-h-0 flex-1 md:block`}
+        className={`${mobileView === "map" ? "block" : "hidden"} relative min-h-0 min-w-0 flex-1 md:block`}
       >
         <CatalogMap
           cameras={allCameras}
