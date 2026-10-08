@@ -21,7 +21,9 @@ from . import config
 #    nuevas, tampoco hace falta migrar).
 # 4: `paradas.plan_id` (copia del plan de su jornada) para que "reprogramada"
 #    se resuelva con un índice; ver `_migrate`.
-SCHEMA_VERSION = 4
+# 5: `paradas.cuadrilla` y `paradas.fecha_informada` (lo que dice el
+#    seguimiento) y `v_paradas.fuera_de_plan`.
+SCHEMA_VERSION = 5
 
 # Vistas que dependen de `paradas`: el esquema las crea con IF NOT EXISTS, así
 # que para cambiarlas hay que borrarlas antes (de la que depende de otra a la base).
@@ -47,12 +49,16 @@ def _migrate(conn: sqlite3.Connection) -> None:
         return
     with conn:
         if "paradas" in {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type = 'table'")}:
-            if "plan_id" not in _columns(conn, "paradas"):  # v4
+            columns = _columns(conn, "paradas")
+            if "plan_id" not in columns:  # v4
                 conn.execute("ALTER TABLE paradas ADD COLUMN plan_id INTEGER")
                 conn.execute(
                     "UPDATE paradas SET plan_id = "
                     "(SELECT r.plan_id FROM recorridos r WHERE r.id = paradas.recorrido_id)"
                 )
+            for column in ("cuadrilla", "fecha_informada"):  # v5
+                if column not in columns:
+                    conn.execute(f"ALTER TABLE paradas ADD COLUMN {column} TEXT")
         for view in _VIEWS:
             conn.execute(f"DROP VIEW IF EXISTS {view}")
 

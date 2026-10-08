@@ -55,6 +55,18 @@ _NOT_DONE_MARKS = frozenset(
 )
 # Columnas que lee el registro al cargar un seguimiento.
 _DATE_PATTERNS = (r"fecha\s*programaci", r"fecha")
+# Quién hizo la tarea. Con más de una cuadrilla por día, es lo que distingue
+# lo que se repartió por fuera del plan.
+_CREW_PATTERNS = (
+    r"cuadrilla", r"t[eé]cnico", r"^m[oó]vil", r"^equipo", r"brigada",
+    r"operari", r"responsable", r"contratista",
+)
+# Cuándo se trabajó de verdad, si la planilla lo trae. Las órdenes reales
+# traen "Inicio Atención" y "Fin Atención": vale el fin (cuándo se cerró).
+_WORKED_DATE_PATTERNS = (
+    r"fin\s*(de\s*)?(la\s*)?atenci",
+    r"fecha\s*(de\s*)?cierre", r"fecha\s*(de\s*)?(ejecuci|realizaci|finalizaci|trabajo)",
+)
 # En las órdenes de trabajo, el nodo al que se migró viene como "NODO".
 _MIGRATED_PATTERNS = (r"se\s+migr", r"nodo\s+migrado", r"nodo\s+(final|real)", r"^nodo$")
 # Planilla de órdenes de trabajo: el ID de la cámara es "ID Contrato" (no el
@@ -163,17 +175,25 @@ def follow_up_mapping(columns: list[str]) -> dict[str, str | None]:
     """Columnas que el registro lee de un Excel de seguimiento completado.
 
     Parte de `suggest_mapping` (los encabezados del Excel exportado están
-    elegidos para que los reconozca) y suma la fecha planificada y el nodo al
-    cual se migró, que el planificador no necesita.
+    elegidos para que los reconozca) y suma la fecha planificada, el nodo al
+    cual se migró, la cuadrilla y la fecha en que se trabajó, que el
+    planificador no necesita.
     """
     base = suggest_mapping(columns)
+    worked_date = _match(columns, _WORKED_DATE_PATTERNS)
     return {
         "id": _match(columns, _ORDER_ID_PATTERNS) or base["id"],
         "done": base["done"],
         "observation": _match(columns, _ORDER_OBS_PATTERNS) or base["observation"],
         "reason": _match(columns, _ORDER_REASON_PATTERNS),
         "migrated_node": _match(columns, _MIGRATED_PATTERNS),
-        "date": _match(columns, _DATE_PATTERNS),
+        # La fecha programada; la de cierre va aparte (si es la única "fecha",
+        # se usa para las dos).
+        "date": _match(
+            [column for column in columns if column != worked_date], _DATE_PATTERNS
+        ) or worked_date,
+        "crew": _match(columns, _CREW_PATTERNS),
+        "worked_date": worked_date,
     }
 
 

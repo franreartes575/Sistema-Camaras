@@ -56,7 +56,10 @@ Author = Annotated[registro.Author, Depends(_author)]
 
 # Filtro de estado de las tareas: "faltan" = pendientes + no realizadas, que
 # es lo que hay que volver a planificar.
-StatusFilter = Literal["pendiente", "realizada", "no_realizada", "reprogramada", "faltan"]
+# "fuera_de_plan" no es un estado: las que se trabajaron otro día que el planificado.
+StatusFilter = Literal[
+    "pendiente", "realizada", "no_realizada", "reprogramada", "faltan", "fuera_de_plan"
+]
 _STATUS_GROUPS: dict[str, list[str]] = {"faltan": ["pendiente", "no_realizada"]}
 
 

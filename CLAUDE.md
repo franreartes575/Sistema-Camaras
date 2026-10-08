@@ -111,10 +111,25 @@ El registro también carga la **planilla de órdenes de trabajo** (indicador
 ID de cámara (no `N° OT`), `Obs. Cierre` como observación (`Observaciones` es la
 instrucción de la orden), `Estado No Realizado` como motivo y `NODO` como nodo
 migrado. Reglas en `registro._orders_update`: el nodo migrado se carga sólo en las
-realizadas; la observación, si no se realizó (motivo + lo que escribió el técnico) o
-si el nodo difiere del preliminar de la parada (o no hay con qué compararlo). El
+realizadas; la observación se guarda siempre (si no se realizó, motivo + lo que
+escribió el técnico). Antes se descartaba cuando el nodo coincidía con el
+preliminar, y se perdían notas importantes (caso 1-0384): no la vuelvas a
+filtrar. El día trabajado es `Fin Atención` (si no, la fecha de cierre o la
+programada). Una fila de un día anterior al que ya tiene la tarea no se aplica
+(`stale`): volver a subir una planilla vieja no pisa lo más nuevo. El
 formato anterior ("Realizado") no cambia. Esa planilla no trae coordenadas de lo
 no realizado: sirve para el Registro, no para replanificar sin él.
+
+**Cambios hechos fuera del programa** (esquema v5): de cada fila del
+seguimiento se guardan la cuadrilla (`Cuadrilla`, `Técnico`, `Móvil`,
+`Equipo`…; `_CREW_PATTERNS`) y el día en que se trabajó (`fecha_informada`:
+la de cierre si viene, si no la programada). Si no es el día de su jornada,
+la tarea es `fuera_de_plan` (columna derivada en `v_paradas`, y valor del
+filtro `estado`, aunque no es un estado). La carga lo informa
+(`off_plan_tasks`, `crews_by_day`) y cruza igual: la fila cae en la tarea
+más reciente de esa cámara. Una fila sin novedad sólo guarda cuadrilla y
+fecha si la fecha cambió: si no, no marcaría como verificada una tarea que
+nadie tocó (y eso impide reemplazar el plan).
 
 La jornada con menos cámaras queda siempre última (`_lightest_day_last` en
 `vrp.py`): es la que tiene lugar para sumarle lo que quede pendiente.

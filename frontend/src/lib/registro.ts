@@ -12,7 +12,7 @@ export type TaskStatus = "pendiente" | "realizada" | "no_realizada" | "reprogram
 /** Lo que se puede informar a mano: "reprogramada" se deriva sola. */
 export type ReportedStatus = Exclude<TaskStatus, "reprogramada">;
 /** Filtro de tareas; "faltan" = pendientes + no realizadas. */
-export type StatusFilter = TaskStatus | "faltan";
+export type StatusFilter = TaskStatus | "faltan" | "fuera_de_plan";
 
 export type TaskCounts = {
   total: number;
@@ -76,6 +76,11 @@ export type Task = {
   /** Quién la corrigió a mano por última vez, y cuándo (hora local del servidor). */
   corrected_by: string | null;
   corrected_at: string | null;
+  /** Cuadrilla que la hizo y día en que se trabajó, según el seguimiento. */
+  crew: string | null;
+  reported_date: string | null;
+  /** Se trabajó otro día que el planificado: un cambio hecho fuera del programa. */
+  off_plan: boolean;
 };
 
 export type RouteDetail = RouteSummary & {
@@ -98,7 +103,24 @@ export type FollowUpResult = {
   unmatched: number;
   unmatched_ids: string[];
   previously_loaded_at: string | null;
+  /** Columna de la que se leyó la cuadrilla; null si el archivo no tiene. */
+  crew_column: string | null;
+  /** Filas más viejas que lo ya cargado en su tarea: no se aplicaron. */
+  stale: number;
+  off_plan: number;
+  off_plan_tasks: OffPlanTask[];
+  crews_by_day: CrewDay[];
 };
+
+/** Una tarea que se trabajó otro día que el planificado. */
+export type OffPlanTask = {
+  camera_id: string;
+  planned_date: string;
+  reported_date: string;
+  crew: string | null;
+};
+
+export type CrewDay = { date: string; crews: { crew: string; tasks: number }[] };
 
 export type FollowUpImport = {
   id: number;

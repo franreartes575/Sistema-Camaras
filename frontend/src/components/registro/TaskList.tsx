@@ -11,13 +11,21 @@ import { BUTTON } from "@/components/ui/controls";
 import { IconDownload, IconRoute } from "@/components/ui/icons";
 import type { StatusFilter, Task, TaskChanges } from "@/lib/registro";
 
-export type TaskView = "faltan" | "realizada" | "no_realizada" | "reprogramada" | "todas";
+export type TaskView =
+  | "faltan"
+  | "realizada"
+  | "no_realizada"
+  | "reprogramada"
+  | "fuera_de_plan"
+  | "todas";
 
 export const TASK_VIEWS: { id: TaskView; label: string; statuses: StatusFilter[] }[] = [
   { id: "faltan", label: "Faltan", statuses: ["faltan"] },
   { id: "realizada", label: "Realizadas", statuses: ["realizada"] },
   { id: "no_realizada", label: "No realizadas", statuses: ["no_realizada"] },
   { id: "reprogramada", label: "Reprogramadas", statuses: ["reprogramada"] },
+  // Trabajadas otro día que el planificado (p. ej. por otra cuadrilla).
+  { id: "fuera_de_plan", label: "Fuera del plan", statuses: ["fuera_de_plan"] },
   { id: "todas", label: "Todas", statuses: [] },
 ];
 

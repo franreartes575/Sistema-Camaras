@@ -65,6 +65,11 @@ CREATE TABLE IF NOT EXISTS paradas (
     -- (camara_id, plan_id) "¿se volvió a planificar?" es una búsqueda, no
     -- un recorrido por todas las paradas (ver v_paradas).
     plan_id         INTEGER,
+    -- Lo que informa el seguimiento: quién la hizo y qué día se trabajó (la
+    -- fecha de cierre, o la programada). Si la fecha no es la de su jornada,
+    -- la tarea se reprogramó por fuera del programa (ver v_paradas).
+    cuadrilla       TEXT,
+    fecha_informada TEXT,                    -- AAAA-MM-DD
     UNIQUE (recorrido_id, orden)
 );
 
@@ -181,7 +186,8 @@ SELECT
             WHERE otra.camara_id = pa.camara_id AND otra.plan_id > r.plan_id
         ) THEN 'reprogramada'
         ELSE pa.estado
-    END AS estado_actual
+    END AS estado_actual,
+    (pa.fecha_informada IS NOT NULL AND pa.fecha_informada <> r.fecha) AS fuera_de_plan
 FROM paradas pa
 JOIN recorridos r ON r.id = pa.recorrido_id
 JOIN planes pl ON pl.id = r.plan_id;

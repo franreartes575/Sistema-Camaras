@@ -6,7 +6,7 @@ import { useState, type KeyboardEvent } from "react";
 
 import { StatusIcon, STATUS_LABEL } from "@/components/registro/StatusBadge";
 import { IconEye, IconPencil } from "@/components/ui/icons";
-import { formatDayLabel } from "@/lib/format";
+import { formatDayLabel, formatShortDate, formatTimestamp } from "@/lib/format";
 import type { ReportedStatus, Task, TaskChanges, TaskStatus } from "@/lib/registro";
 
 const REPORTABLE: ReportedStatus[] = ["pendiente", "realizada", "no_realizada"];
@@ -186,17 +186,33 @@ function useTaskEditing(task: Task, busy: boolean, onUpdate: TaskUpdater | undef
   return { select, editButton, editor };
 }
 
-/** "AAAA-MM-DD HH:MM:SS" (hora local del servidor) → "DD/MM HH:MM". */
-function shortStamp(stamp: string): string {
-  const [date, time = ""] = stamp.split(" ");
-  return `${date.slice(8, 10)}/${date.slice(5, 7)} ${time.slice(0, 5)}`.trim();
+/**
+ * Quién la hizo y si fue otro día que el planificado. Lo de otro día va con
+ * rótulo y no sólo en color: es lo que hay que poder encontrar.
+ */
+function CrewNote({ task }: { task: Task }) {
+  if (!task.crew && !task.off_plan) return null;
+  const crew = task.crew ?? "Sin cuadrilla informada";
+  if (!task.off_plan || !task.reported_date) {
+    return <span className="block truncate">{crew}</span>;
+  }
+  return (
+    <span className="block truncate text-amber-300">
+      <span className="font-semibold">Fuera del plan:</span> {crew} · el{" "}
+      {formatShortDate(task.reported_date)} (planificada {formatShortDate(task.date)})
+    </span>
+  );
 }
 
-/** Detalle secundario: nodo, observación y última corrección manual, si los hay. */
+/** Detalle secundario: cuadrilla, nodo, observación y última corrección manual, si los hay. */
 function TaskNotes({ task }: { task: Task }) {
-  if (!task.node && !task.migrated_node && !task.observation && !task.corrected_by) return null;
+  const hasCrew = task.crew || task.off_plan;
+  if (!hasCrew && !task.node && !task.migrated_node && !task.observation && !task.corrected_by) {
+    return null;
+  }
   return (
     <span className="mt-0.5 block space-y-0.5 text-[11px] leading-snug text-slate-400">
+      <CrewNote task={task} />
       {(task.node || task.migrated_node) && (
         <span className="block truncate">
           Nodo {task.node ?? "—"}
@@ -207,7 +223,7 @@ function TaskNotes({ task }: { task: Task }) {
       {task.corrected_by && (
         <span className="block truncate text-slate-500">
           Corregida por {task.corrected_by}
-          {task.corrected_at && ` · ${shortStamp(task.corrected_at)}`}
+          {task.corrected_at && ` · ${formatTimestamp(task.corrected_at)}`}
         </span>
       )}
     </span>

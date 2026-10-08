@@ -667,6 +667,8 @@ def test_una_base_v3_se_migra_al_abrirla(client: TestClient) -> None:
     conn.execute("DROP INDEX idx_paradas_camara_plan")
     conn.execute("DROP INDEX idx_paradas_plan")
     conn.execute("ALTER TABLE paradas DROP COLUMN plan_id")
+    conn.execute("ALTER TABLE paradas DROP COLUMN cuadrilla")
+    conn.execute("ALTER TABLE paradas DROP COLUMN fecha_informada")
     conn.execute("PRAGMA user_version = 3")
     conn.commit()
     conn.close()
@@ -800,6 +802,8 @@ def test_reconoce_las_columnas_del_excel_exportado() -> None:
         "reason": None,
         "migrated_node": "Nodo al cual se migró",
         "date": "Fecha de planificación",
+        "crew": None,
+        "worked_date": None,
     }
 
 
@@ -856,17 +860,18 @@ def test_las_ordenes_se_cruzan_por_id_contrato_y_no_por_numero_de_ot(client: Tes
     assert _tareas(client)[("A-1", guardado["id"])]["status"] == "realizada"
 
 
-def test_orden_realizada_con_el_nodo_preliminar_no_guarda_observacion(client: TestClient) -> None:
-    """Lo hecho es lo planificado: sólo se anota el nodo (sin mirar mayúsculas)."""
+def test_orden_realizada_con_el_nodo_preliminar_guarda_la_observacion(client: TestClient) -> None:
+    """Aunque se migró al nodo planificado, lo que escribió el técnico puede
+    importar (caso 1-0384: "no se retira el enlace previo, es para camión")."""
     guardado = _plan_de_ordenes(client)
     _cargar(client, _ordenes([{
         "ID Contrato": "A-1", "Cierre": "REALIZADO", "NODO": "SOLIDARIDAD",
-        "Obs. Cierre": "Se realiza asistencia con éxito",
+        "Obs. Cierre": "Se migra a Solidaridad; no se retira el enlace previo, es para camión",
     }]))
 
     tarea = _tareas(client)[("A-1", guardado["id"])]
     assert (tarea["status"], tarea["migrated_node"]) == ("realizada", "SOLIDARIDAD")
-    assert tarea["observation"] is None
+    assert tarea["observation"] == "Se migra a Solidaridad; no se retira el enlace previo, es para camión"
 
 
 def test_orden_realizada_en_otro_nodo_guarda_la_observacion(client: TestClient) -> None:
@@ -938,6 +943,7 @@ def test_reconoce_las_columnas_de_la_planilla_de_ordenes() -> None:
     columnas = [
         "N° OT", "Estado", "ID Contrato", "Fecha Programación", "Fecha Creación", "Cierre",
         "Observaciones", "Obs. Cierre", "Estado No Realizado", "NODO", "COORDENADAS",
+        "Cuadrilla", "Fecha Cierre",
     ]
 
     assert follow_up_mapping(columnas) == {
@@ -947,4 +953,148 @@ def test_reconoce_las_columnas_de_la_planilla_de_ordenes() -> None:
         "reason": "Estado No Realizado",
         "migrated_node": "NODO",
         "date": "Fecha Programación",
+        "crew": "Cuadrilla",
+        "worked_date": "Fecha Cierre",
     }
+
+
+def test_en_las_ordenes_reales_el_dia_trabajado_es_fin_atencion() -> None:
+    """Así vienen las órdenes de Nubicom: sin "Fecha Cierre", pero con el
+    inicio y el fin de la atención. El día trabajado es el del fin."""
+    columnas = [
+        "N° OT", "Estado", "ID Contrato", "Cuadrilla", "Fecha Programación", "Hora Programación",
+        "Cierre", "Observaciones", "Obs. Cierre", "Fecha Creación", "Inicio Atención",
+        "Fin Atención", "Estado No Realizado", "NODO", "Técnico 1", "Técnico 2",
+    ]
+
+    mapeo = follow_up_mapping(columnas)
+
+    assert (mapeo["date"], mapeo["worked_date"], mapeo["crew"]) == (
+        "Fecha Programación", "Fin Atención", "Cuadrilla",
+    )
+
+
+@pytest.mark.parametrize("encabezado", ["Cuadrilla", "Técnico", "Tecnico Asignado", "Móvil", "Equipo", "Brigada"])
+def test_reconoce_la_columna_de_cuadrilla_con_otros_nombres(encabezado: str) -> None:
+    columnas = ["ID Contrato", "Fecha Programación", "Cierre", encabezado]
+
+    assert follow_up_mapping(columnas)["crew"] == encabezado
+
+
+# --------------------------------------------------------------------------
+# Cambios hechos fuera del programa: otra cuadrilla, otro día
+# --------------------------------------------------------------------------
+
+
+def test_una_tarea_que_otra_cuadrilla_hizo_otro_dia_queda_marcada(client: TestClient) -> None:
+    """El plan era para una cuadrilla el 5/10; se liberó otra y se le pasó A-2
+    para el 7/10. La carga lo cruza igual, pero lo marca y lo informa."""
+    guardado = _plan_de_ordenes(client)
+
+    resultado = _cargar(client, _ordenes([
+        {"ID Contrato": "A-1", "Cierre": "REALIZADO", "Cuadrilla": "Cuadrilla 1"},
+        {"ID Contrato": "A-2", "Cierre": "REALIZADO", "Cuadrilla": "Cuadrilla 2",
+         "Fecha Programación": "7/10/2026"},
+    ]))
+
+    assert resultado["matched"] == 2 and resultado["done"] == 2
+    assert resultado["crew_column"] == "Cuadrilla"
+    assert resultado["off_plan"] == 1
+    assert resultado["off_plan_tasks"] == [{
+        "camera_id": "A-2", "planned_date": "2026-10-05", "reported_date": "2026-10-07",
+        "crew": "Cuadrilla 2",
+    }]
+    tareas = _tareas(client)
+    a1, a2 = tareas[("A-1", guardado["id"])], tareas[("A-2", guardado["id"])]
+    assert (a1["crew"], a1["reported_date"], a1["off_plan"]) == ("Cuadrilla 1", "2026-10-05", False)
+    assert (a2["crew"], a2["reported_date"], a2["off_plan"]) == ("Cuadrilla 2", "2026-10-07", True)
+    assert a2["status"] == "realizada"
+
+
+def test_informa_que_cuadrillas_trabajaron_cada_dia(client: TestClient) -> None:
+    _plan_de_ordenes(client)
+
+    resultado = _cargar(client, _ordenes([
+        {"ID Contrato": "A-1", "Cierre": "REALIZADO", "Cuadrilla": "Cuadrilla 1"},
+        {"ID Contrato": "A-2", "Cierre": "REALIZADO", "Cuadrilla": "Cuadrilla 1"},
+        {"ID Contrato": "A-3", "Cierre": "NO REALIZADO", "Cuadrilla": "Cuadrilla 2"},
+    ]))
+
+    assert resultado["crews_by_day"] == [{
+        "date": "2026-10-05",
+        "crews": [{"crew": "Cuadrilla 1", "tasks": 2}, {"crew": "Cuadrilla 2", "tasks": 1}],
+    }]
+    assert resultado["off_plan"] == 0
+
+
+def test_la_fecha_de_cierre_manda_sobre_la_programada(client: TestClient) -> None:
+    """Si la planilla dice cuándo se cerró la orden, ése es el día en que se trabajó."""
+    guardado = _plan_de_ordenes(client)
+
+    resultado = _cargar(client, _ordenes([
+        {"ID Contrato": "A-4", "Cierre": "REALIZADO", "Cuadrilla": "Cuadrilla 2", "Fecha Cierre": "6/10/2026 15:20"},
+    ]))
+
+    assert resultado["off_plan"] == 1
+    assert _tareas(client)[("A-4", guardado["id"])]["reported_date"] == "2026-10-06"
+
+
+def test_se_pueden_listar_solo_las_tareas_fuera_del_plan(client: TestClient) -> None:
+    guardado = _plan_de_ordenes(client)
+    _cargar(client, _ordenes([
+        {"ID Contrato": "A-1", "Cierre": "REALIZADO", "Cuadrilla": "Cuadrilla 1"},
+        {"ID Contrato": "A-2", "Cierre": "REALIZADO", "Cuadrilla": "Cuadrilla 2", "Fecha Programación": "7/10/2026"},
+    ]))
+
+    assert set(_tareas(client, estado="fuera_de_plan")) == {("A-2", guardado["id"])}
+
+
+def test_una_orden_abierta_reprogramada_queda_marcada_sin_cambiar_el_estado(client: TestClient) -> None:
+    """Todavía sin cerrar, pero ya pasada a la otra cuadrilla para otro día:
+    eso también es un cambio del plan. Una sin novedad en su día, no toca nada."""
+    guardado = _plan_de_ordenes(client)
+
+    resultado = _cargar(client, _ordenes([
+        {"ID Contrato": "A-3", "Cierre": None, "Cuadrilla": "Cuadrilla 2", "Fecha Programación": "8/10/2026"},
+        {"ID Contrato": "A-4", "Cierre": None, "Cuadrilla": "Cuadrilla 1"},
+    ]))
+
+    tareas = _tareas(client)
+    a3, a4 = tareas[("A-3", guardado["id"])], tareas[("A-4", guardado["id"])]
+    assert resultado["off_plan"] == 1 and resultado["updated"] == 1
+    assert (a3["status"], a3["crew"], a3["off_plan"]) == ("pendiente", "Cuadrilla 2", True)
+    assert (a4["crew"], a4["verified_at"]) == (None, None)
+
+
+def test_un_archivo_viejo_cargado_despues_no_pisa_lo_mas_nuevo(client: TestClient) -> None:
+    """Caso 1-1494: el 05/10 no se pudo, el 06/10 la hizo la otra cuadrilla.
+    Volver a subir la planilla del 05/10 no puede devolverla a "no realizada"."""
+    guardado = _plan_de_ordenes(client)
+    nuevo = _ordenes([{
+        "ID Contrato": "A-1", "Cierre": "REALIZADO", "Cuadrilla": "AE414UC", "NODO": "SOLIDARIDAD",
+        "Fecha Programación": "6/10/2026", "Fin Atención": "6/10/2026 16:04",
+    }])
+    viejo = _ordenes([{
+        "ID Contrato": "A-1", "Cierre": "NO REALIZADO", "Cuadrilla": "AE414WY",
+        "Estado No Realizado": "FIN DE TURNO", "Fin Atención": "5/10/2026 18:30",
+    }])
+
+    _cargar(client, nuevo)
+    resultado = _cargar(client, viejo)
+
+    tarea = _tareas(client)[("A-1", guardado["id"])]
+    assert (tarea["status"], tarea["crew"], tarea["reported_date"]) == ("realizada", "AE414UC", "2026-10-06")
+    assert resultado["stale"] == 1 and resultado["updated"] == 0
+
+
+def test_sin_columna_de_cuadrilla_igual_detecta_el_cambio_de_dia(client: TestClient) -> None:
+    _plan_de_ordenes(client)
+
+    resultado = _cargar(client, _ordenes([
+        {"ID Contrato": "A-2", "Cierre": "REALIZADO", "Fecha Programación": "7/10/2026"},
+    ]))
+
+    assert resultado["crew_column"] is None
+    assert resultado["off_plan"] == 1
+    assert resultado["off_plan_tasks"][0]["crew"] is None
+    assert resultado["crews_by_day"] == []
